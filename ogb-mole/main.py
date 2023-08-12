@@ -96,7 +96,7 @@ def train(model, device, loader, optimizer, task_type, args):
                     reg_loss_.append(reg_loss_i)
                 var = torch.var(torch.stack(reg_loss_))
                 # reg_loss = torch.stack(reg_loss_).max()
-                print(sup_loss, var)
+                # print(sup_loss, var)
                 loss = sup_loss + args.reg_weight * var
             else:
                 loss = sup_loss
