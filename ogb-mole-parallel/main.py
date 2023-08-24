@@ -143,9 +143,6 @@ def main():
         help='which gpu to use if any (default: 0), negative for cpu'
     )
     parser.add_argument(
-        '--method', type=str, default='ours'
-    )
-    parser.add_argument(
         '--dropout', type=float, default=0.,
         help='dropout ratio (default: 0.5)'
     )
@@ -248,14 +245,12 @@ def main():
         shuffle=False, num_workers=args.num_workers
     )
 
-    if args.method == 'ours':
-        model = DIFFormerMol(
-            num_tasks=dataset.num_tasks, num_layer=args.num_layer, emb_dim=args.emb_dim,
-            JK='last', pooling = 'mean', virtual=False, num_heads=args.num_heads, kernel=args.kernel,
-            alpha=args.alpha, dropout=args.dropout, use_bn=args.use_bn, use_residual=args.use_residual, use_weight=args.use_weight
-        ).to(device)
-    else:
-        raise ValueError('Invalid GNN type')
+    model = DIFFormerMol(
+        num_tasks=dataset.num_tasks, num_layer=args.num_layer, emb_dim=args.emb_dim,
+        JK='last', pooling = 'mean', gnn_type=args.gnn_type, num_heads=args.num_heads, kernel=args.kernel,
+        alpha=args.alpha, dropout=args.dropout, use_bn=args.use_bn, use_residual=args.use_residual, use_weight=args.use_weight
+    ).to(device)
+    
 
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
