@@ -259,11 +259,11 @@ def main():
     train_curve = []
 
     i = 1
-    model_path = args.model_dir + args.dataset + '_' + args.method + f'_v{i}'
+    model_path = args.model_dir + args.dataset + '_' + args.gnn_type + f'_v{i}'
     while os.path.exists(model_path):
         i += 1
-        model_path = args.model_dir + args.dataset + '_' + args.method + f'_v{i}'
-    result_path = args.result_dir + args.dataset + '_' + args.method + f'_v{i}'
+        model_path = args.model_dir + args.dataset + '_' + args.gnn_type + f'_v{i}'
+    result_path = args.result_dir + args.dataset + '_' + args.gnn_type + f'_v{i}'
     best_val = 0.
 
     for epoch in range(1, args.epochs + 1):

@@ -293,18 +293,17 @@ class MyGATConv(MessagePassing):
         )
         self.add_self_loop = add_self_loop
 
-        self.att_src = Parameter(torch.zeros(1, heads, out_channels))
-        self.att_dst = Parameter(torch.zeros(1, heads, out_channels))
-        self.att_edge = Parameter(torch.zeros(1, heads, out_channels))
+        self.att_src = torch.nn.Parameter(torch.zeros(1, heads, out_channels))
+        self.att_dst = torch.nn.Parameter(torch.zeros(1, heads, out_channels))
+        self.att_edge = torch.nn.Parameter(torch.zeros(1, heads, out_channels))
 
-        self.bias = Parameter(torch.zeros(heads * out_channels))
+        self.bias = torch.nn.Parameter(torch.zeros(heads * out_channels))
         self.lin_edge = BondEncoder(out_channels * heads)
         self.reset_parameters()
 
     def reset_parameters(self):
         self.lin_src.reset_parameters()
         self.lin_dst.reset_parameters()
-        self.lin_edge.reset_parameters()
         glorot(self.att_src)
         glorot(self.att_dst)
         glorot(self.att_edge)
@@ -384,7 +383,7 @@ class DIFFormerMolNode(torch.nn.Module):
             elif gnn_type == 'sage':
                 self.gnn_convs.append(SAGEMolConv(emb_dim, emb_dim))
             elif gnn_type == 'gat':
-                assert emb_dim // num_heads == 0, 'The dim should be evenly divided by num_heads'
+                assert emb_dim % num_heads == 0, f'The dim {emb_dim} is not evenly divided by num_heads {num_heads}'
                 self.gnn_convs.append(MyGATConv(emb_dim, emb_dim // num_heads, heads=num_heads))
 
             self.attn_convs.append(DIFFormerConv(
