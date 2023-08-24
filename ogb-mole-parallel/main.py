@@ -301,12 +301,13 @@ def main():
 
     if not args.result_dir == '':
         with open(result_path, 'a') as f:
+            f.write('args:\n')
             json.dump(args.__dict__, f, indent=4)
-            f.write('\n')
+            f.write('\nperfL\n')
             for i in range(len(train_curve)):
                 f.write(f'train score {train_curve[i]:.3f} valid score {valid_curve[i]:.3f} test score {test_curve[i]:.3f}\n')
 
-            f.write(f'best valid epoch: train score {train_curve[best_val_epoch]:.3f} valid score {valid_curve[best_val_epoch]:.3f} test score {test_curve[best_val_epoch]:.3f}')
+            f.write(f'best valid epoch: train score {train_curve[best_val_epoch]:.3f} valid score {valid_curve[best_val_epoch]:.3f} test score {test_curve[best_val_epoch]:.3f}\n\n')
 
 if __name__ == "__main__":
     main()
