@@ -10,6 +10,7 @@ from tqdm import tqdm
 import argparse
 import os
 import numpy as np
+import json
 
 # importing OGB
 from ogb.graphproppred import PygGraphPropPredDataset, Evaluator
@@ -305,6 +306,8 @@ def main():
 
     if not args.result_dir == '':
         with open(result_path, 'a') as f:
+            json.dump(args.__dict__, f, indent=4)
+            f.write('\n')
             for i in range(len(train_curve)):
                 f.write(f'train score {train_curve[i]:.3f} valid score {valid_curve[i]:.3f} test score {test_curve[i]:.3f}\n')
 
