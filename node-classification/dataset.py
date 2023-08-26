@@ -23,7 +23,7 @@ import json
 
 def load_twitch(data_dir, lang):
     assert lang in ('DE', 'ENGB', 'ES', 'FR', 'PTBR', 'RU', 'TW'), 'Invalid dataset'
-    filepath = f"{data_dir}/twitch/{lang}"
+    filepath = f"{data_dir}twitch/{lang}"
     label = []
     node_ids = []
     src = []

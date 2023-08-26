@@ -69,7 +69,7 @@ def parser_add_main_args(parser):
     # setup and protocol
     parser.add_argument('--dataset', type=str, default='cora')
     parser.add_argument('--data_dir', type=str,
-                        default='../../OODgraph-GNNSafe/data/')
+                        default='../../../OODgraph-GNNSafe/data/')
     parser.add_argument('--device', type=int, default=0,
                         help='which gpu to use if any (default: 0)')
     parser.add_argument('--cpu', action='store_true')
@@ -170,3 +170,5 @@ def parser_add_main_args(parser):
                         help='set to use faster sgc')
     parser.add_argument('--print_prop', action='store_true',
                         help='print proportions of predicted class')
+    parser.add_argument('--save_result', action='store_true', help='save results')
+

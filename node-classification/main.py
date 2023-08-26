@@ -9,11 +9,11 @@ from torch_geometric.utils import to_undirected
 from torch_scatter import scatter
 from torch_geometric.data import ShaDowKHopSampler
 
-from logger import Logger
+from logger import Logger, save_result
 from dataset import *
 from eval import evaluate_full, eval_acc, eval_rocauc, eval_f1
 from parse import parse_method, parser_add_main_args
-from model_full import *
+from model import *
 from ours import *
 
 
@@ -165,5 +165,8 @@ for run in range(args.runs):
     logger.print_statistics(run)
 
 
-logger.print_statistics()
-logger.output(args)
+results = logger.print_statistics()
+
+### Save results ###
+if args.save_result:
+    save_result(args, results)

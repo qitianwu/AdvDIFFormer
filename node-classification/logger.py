@@ -66,3 +66,19 @@ class Logger(object):
             for i in range(ood_size):
                 r = best_result[:, i+4+ood_size]
                 print(f'   Final OOD Test: {r.mean():.2f} ± {r.std():.2f}')
+            return best_result[:, -ood_size-2:]
+
+import os
+def save_result(args, results):
+    if not os.path.exists(f'results/{args.dataset}'):
+        os.makedirs(f'results/{args.dataset}')
+    filename = f'results/{args.dataset}/{args.method}.csv'
+    print(f"Saving results to {filename}")
+    with open(f"{filename}", 'a+') as write_obj:
+        write_obj.write(
+            f"{args.method} " + f"{args.gnn_type}: " + f"{args.lr}: " + f"{args.weight_decay} " + \
+            f"{args.num_layers} " + f"{args.hidden_channels}: " + \
+            f"{args.reg_weight} " + f"{args.num_aug_branch}: " + f"{args.modify_ratio} " + f"{args.rewiring_type} " + "\n")
+        for i in range(results.size(1)):
+            r = results[:, i]
+            write_obj.write(f"{r.mean():.2f} $\pm$ {r.std():.2f} \n")

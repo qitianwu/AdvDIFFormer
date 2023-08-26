@@ -39,7 +39,6 @@ def rewiring(edge_index, batch, ratio, edge_attr=None, type='delete'):
     else:
         return edge_index
 
-
 def to_block(inputs, n_nodes):
     '''
     input: (N, n_col), n_nodes: (B)
