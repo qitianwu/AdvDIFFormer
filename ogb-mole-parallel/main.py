@@ -10,6 +10,7 @@ from tqdm import tqdm
 import argparse
 import os
 import numpy as np
+import json
 
 # importing OGB
 from ogb.graphproppred import PygGraphPropPredDataset, Evaluator
@@ -142,9 +143,6 @@ def main():
         help='which gpu to use if any (default: 0), negative for cpu'
     )
     parser.add_argument(
-        '--method', type=str, default='ours'
-    )
-    parser.add_argument(
         '--dropout', type=float, default=0.,
         help='dropout ratio (default: 0.5)'
     )
@@ -247,14 +245,12 @@ def main():
         shuffle=False, num_workers=args.num_workers
     )
 
-    if args.method == 'ours':
-        model = DIFFormerMol(
-            num_tasks=dataset.num_tasks, num_layer=args.num_layer, emb_dim=args.emb_dim,
-            JK='last', pooling = 'mean', virtual=False, num_heads=args.num_heads, kernel=args.kernel,
-            alpha=args.alpha, dropout=args.dropout, use_bn=args.use_bn, use_residual=args.use_residual, use_weight=args.use_weight
-        ).to(device)
-    else:
-        raise ValueError('Invalid GNN type')
+    model = DIFFormerMol(
+        num_tasks=dataset.num_tasks, num_layer=args.num_layer, emb_dim=args.emb_dim,
+        JK='last', pooling = 'mean', gnn_type=args.gnn_type, num_heads=args.num_heads, kernel=args.kernel,
+        alpha=args.alpha, dropout=args.dropout, use_bn=args.use_bn, use_residual=args.use_residual, use_weight=args.use_weight
+    ).to(device)
+    
 
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
@@ -263,11 +259,11 @@ def main():
     train_curve = []
 
     i = 1
-    model_path = args.model_dir + args.dataset + '_' + args.method + f'_v{i}'
+    model_path = args.model_dir + args.dataset + '_' + args.gnn_type + f'_v{i}'
     while os.path.exists(model_path):
         i += 1
-        model_path = args.model_dir + args.dataset + '_' + args.method + f'_v{i}'
-    result_path = args.result_dir + args.dataset + '_' + args.method + f'_v{i}'
+        model_path = args.model_dir + args.dataset + '_' + args.gnn_type + f'_v{i}'
+    result_path = args.result_dir + args.dataset + '_' + args.gnn_type + f'_v{i}'
     best_val = 0.
 
     for epoch in range(1, args.epochs + 1):
@@ -305,10 +301,13 @@ def main():
 
     if not args.result_dir == '':
         with open(result_path, 'a') as f:
+            f.write('args:\n')
+            json.dump(args.__dict__, f, indent=4)
+            f.write('\nperfL\n')
             for i in range(len(train_curve)):
                 f.write(f'train score {train_curve[i]:.3f} valid score {valid_curve[i]:.3f} test score {test_curve[i]:.3f}\n')
 
-            f.write(f'best valid epoch: train score {train_curve[best_val_epoch]:.3f} valid score {valid_curve[best_val_epoch]:.3f} test score {test_curve[best_val_epoch]:.3f}')
+            f.write(f'best valid epoch: train score {train_curve[best_val_epoch]:.3f} valid score {valid_curve[best_val_epoch]:.3f} test score {test_curve[best_val_epoch]:.3f}\n\n')
 
 if __name__ == "__main__":
     main()
