@@ -41,106 +41,109 @@ def rewiring(edge_index, batch, ratio, edge_attr=None, type='delete'):
 
 def to_block(inputs, n_nodes):
     '''
-    input: (N, n_col), n_nodes: (B)
+    input: (N, H, n_col), n_nodes: (B)
     '''
-    feat_list = []
+    blocks = []
     cnt = 0
-    for n in n_nodes:
-        feat_list.append(inputs[cnt : cnt + n])
-        cnt += n
-    blocks = torch.block_diag(*feat_list)
-
-    return blocks  # (N, n_col*B)
+    for h in range(inputs.size(1)):
+        feat_list = []
+        for n in n_nodes:
+            feat_list.append(inputs[cnt : cnt + n, h])
+            cnt += n
+        blocks_h = torch.block_diag(*feat_list) # (N, n_col*B)
+        blocks.append(blocks_h)
+    blocks = torch.stack(blocks, dim=1) # (N, H, n_col*B)
+    return blocks
 
 def unpack_block(inputs, n_col, n_nodes):
     '''
-    input: (N, B*n_col), n_col: int, n_nodes: (B)
+    input: (N, H, B*n_col), n_col: int, n_nodes: (B)
     '''
-    feat_list = []
+    unblocks = []
     cnt = 0
     start_col = 0
-    for n in n_nodes:
-        feat_list.append(inputs[cnt:cnt + n, start_col:start_col + n_col])
-        cnt += n
-        start_col += n_col
-
-    return torch.cat(feat_list, dim=0)  # (N, n_col)
-
+    for h in range(inputs.size(1)):
+        feat_list = []
+        for n in n_nodes:
+            feat_list.append(inputs[cnt:cnt + n, h, start_col:start_col + n_col])
+            cnt += n
+            start_col += n_col
+        unblocks_h = torch.cat(feat_list, dim=0) # (N, n_col)
+        unblocks.append(unblocks_h)
+    unblocks = torch.stack(unblocks, dim=1) # (N, H, n_col)
+    return unblocks
 
 def batch_repeat(inputs, n_col, n_nodes):
     '''
-    input: (B*n_col), n_col: int, n_nodes: (B)
+    input: (H, B*n_col), n_col: int, n_nodes: (B)
     '''
     x_list = []
     cnt = 0
     for n in n_nodes:
-        x = inputs[cnt:cnt + n_col].repeat((n, 1))  # (n, n_col)
+        x = inputs[:, cnt:cnt + n_col].repeat(n, 1, 1)  # (n, H, n_col)
         x_list.append(x)
         cnt += n_col
-
-    return torch.cat(x_list, dim=0)
+    return torch.cat(x_list, dim=0) # [N, H, n_col]
 
 def full_attention_conv(qs, ks, vs, kernel, n_nodes=None, block_wise=False, output_attn=False):
     '''
-    qs: query tensor [N, D]
-    ks: key tensor [N, D]
-    vs: value tensor [N, D]
+    qs: query tensor [N, H, D]
+    ks: key tensor [N, H, D]
+    vs: value tensor [N, H, D]
     n_nodes: num of nodes per graph [B]
 
-    return output [N, D]
+    return output [N, H, D]
     '''
     if kernel == 'simple':
         if block_wise:
             # normalize input
-            qs = qs / torch.norm(qs, p=2, dim=1, keepdim=True)  # (N, D)
-            ks = ks / torch.norm(ks, p=2, dim=1, keepdim=True)  # (N, D)
+            qs = qs / torch.norm(qs, p=2, dim=2, keepdim=True)  # (N, H, D)
+            ks = ks / torch.norm(ks, p=2, dim=2, keepdim=True)  # (N, H, D)
 
             # numerator
-            q_block = to_block(qs, n_nodes)  # (N, B*D)
-            k_block_T = to_block(ks, n_nodes).T  # (B*D, N)
-            v_block = to_block(vs, n_nodes)  # (N, B*D)
-            kv_block = torch.matmul(k_block_T, v_block)  # (B*M, B*D)
-            qkv_block = torch.matmul(q_block, kv_block)  # (N, B*D)
-            qkv = unpack_block(qkv_block, qs.shape[1], n_nodes)  # (N, D)
+            q_block = to_block(qs, n_nodes)  # (N, H, B*D)
+            k_block = to_block(ks, n_nodes)  # (N, H, B*D)
+            v_block = to_block(vs, n_nodes)  # (N, H, B*D)
+            kvs = torch.einsum("lhm,lhd->hmd", k_block, v_block) # [H, B*D, B*D]
+            attention_num = torch.einsum("nhm,hmd->nhd", q_block, kvs)  # (N, H, B*D)
+            attention_num = unpack_block(attention_num, qs.shape[2], n_nodes)  # (N, H, D)
 
-            v_sum = v_block.sum(dim=0)  # (B*D,)
-            v_sum = batch_repeat(v_sum, vs.shape[1], n_nodes)  # (N, D)
-            numerator = qkv + v_sum  # (N, D)
+            vs_sum = v_block.sum(dim=0)  # (H, B*D)
+            vs_sum = batch_repeat(vs_sum, vs.shape[2], n_nodes)  # (N, H, D)
+            attention_num += vs_sum  # (N, H, D)
 
             # denominator
-            one_list = []
-            for n in n_nodes:
-                one = torch.ones((n, 1))
-                one_list.append(one)
-            one_block = torch.block_diag(*one_list).to(qs.device)
-            k_sum_block = torch.matmul(k_block_T, one_block)  # (B*D, B)
-            denom_block = torch.matmul(q_block, k_sum_block)  # (N, B)
-            denominator = unpack_block(denom_block, 1, n_nodes)  # (N, 1)
-            denominator += batch_repeat(n_nodes, 1, n_nodes)  # (N, 1)
+            all_ones = torch.ones([ks.shape[0]]).to(ks.device).reshape(-1, qs.shape[1], 1)  # [N, H, 1]
+            one_block = to_block(all_ones, n_nodes) # [N, H, B]
+            ks_sum = torch.einsum("lhm,lhb->hmb", k_block, one_block) # [H, B*D, B]
+            attention_normalizer = torch.einsum("nhm,hmb->nhb", q_block, ks_sum)  # [N, H, B]
 
-            attn_output = numerator / denominator  # (N, D)
+            attention_normalizer = unpack_block(attention_normalizer, 1, n_nodes)  # (N, H, 1)
+            attention_normalizer += batch_repeat(n_nodes.repeat(qs.shape[1], 1), 1, n_nodes)  # (N, 1)
+
+            attn_output = attention_num / attention_normalizer  # (N, D)
         else:
             # normalize input
-            qs = qs / torch.norm(qs, p=2, dim=1, keepdim=True)  # (N, D)
-            ks = ks / torch.norm(ks, p=2, dim=1, keepdim=True)  # (N, D)
+            qs = qs / torch.norm(qs, p=2, dim=2, keepdim=True)  # (N, H, D)
+            ks = ks / torch.norm(ks, p=2, dim=2, keepdim=True)  # (N, H, D)
             N = qs.shape[0]
 
             # numerator
-            kvs = torch.einsum("lm,ld->md", ks, vs)
-            attention_num = torch.einsum("nm,md->nd", qs, kvs)  # [N, D]
+            kvs = torch.einsum("lhm,lhd->hmd", ks, vs)
+            attention_num = torch.einsum("nhm,hmd->nhd", qs, kvs)  # [N, H, D]
             all_ones = torch.ones([vs.shape[0]]).to(vs.device)
-            vs_sum = torch.einsum("l,ld->d", all_ones, vs)  # [D]
-            attention_num += vs_sum.unsqueeze(0).repeat(vs.shape[0], 1)  # [N, D]
+            vs_sum = torch.einsum("l,lhd->hd", all_ones, vs)  # [H, D]
+            attention_num += vs_sum.unsqueeze(0).repeat(vs.shape[0], 1, 1)  # [N, H, D]
 
             # denominator
-            all_ones = torch.ones([ks.shape[0]]).to(ks.device)
-            ks_sum = torch.einsum("lm,l->m", ks, all_ones)
-            attention_normalizer = torch.einsum("nm,m->n", qs, ks_sum)  # [N]
+            all_ones = torch.ones([ks.shape[0]]).to(ks.device) # [N]
+            ks_sum = torch.einsum("lhm,l->hm", ks, all_ones)
+            attention_normalizer = torch.einsum("nhm,hm->nh", qs, ks_sum)  # [N, H]
 
             # attentive aggregated results
-            attention_normalizer = torch.unsqueeze(attention_normalizer, len(attention_normalizer.shape))  # [N, 1]
+            attention_normalizer = torch.unsqueeze(attention_normalizer, len(attention_normalizer.shape))  # [N, H, 1]
             attention_normalizer += torch.ones_like(attention_normalizer) * N
-            attn_output = attention_num / attention_normalizer  # [N, D]
+            attn_output = attention_num / attention_normalizer  # [N, H, D]
 
             # compute attention for visualization if needed
             if output_attn:
@@ -187,26 +190,33 @@ class DIFFormerConv(nn.Module):
         else:
             value = x.reshape(-1, 1, self.out_channels)
 
-        outputs, attns = [], []
+        # outputs, attns = [], []
         # compute full attentive aggregation
-        for i in range(self.num_heads):
-            qi, ki, vi = query[:, i, :], key[:, i, :], value[:, i, :]
-            if output_attn:
-                output, attn = full_attention_conv(qi, ki, vi, self.kernel, n_nodes, block_wise, output_attn)  # [N, D]
-                attns.append(attn)
-            else:
-                output = full_attention_conv(qi, ki, vi, self.kernel, n_nodes, block_wise) # [N, D]
-            outputs.append(output)
-
-        if self.num_heads > 1:
-            outputs = torch.stack(outputs, dim=1) # [N, H, D]
-            final_output = outputs.mean(dim=1)
-        else:
-            final_output = outputs[0]
+        # for i in range(self.num_heads):
+        #     qi, ki, vi = query[:, i, :], key[:, i, :], value[:, i, :]
+        #     if output_attn:
+        #         output, attn = full_attention_conv(qi, ki, vi, self.kernel, n_nodes, block_wise, output_attn)  # [N, D]
+        #         attns.append(attn)
+        #     else:
+        #         output = full_attention_conv(qi, ki, vi, self.kernel, n_nodes, block_wise) # [N, D]
+        #     outputs.append(output)
 
         if output_attn:
-            attn = torch.cat(attns, dim=-1) # [N, N, H]
-            return final_output, attn
+            outputs, attns = full_attention_conv(query, key, value, self.kernel, n_nodes, block_wise, output_attn)  # [N, H, D]
+            # attns.append(attn)
+        else:
+            outputs = full_attention_conv(query, key, value, self.kernel, n_nodes, block_wise) # [N, H, D]
+        # outputs.append(output)
+
+        # if self.num_heads > 1:
+        # outputs = torch.stack(outputs, dim=1) # [N, H, D]
+        final_output = outputs.mean(dim=1)
+        # else:
+        #     final_output = outputs[0]
+
+        if output_attn:
+            # attn = torch.cat(attns, dim=-1) # [N, N, H]
+            return final_output, attns
         else:
             return final_output
 
