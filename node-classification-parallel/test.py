@@ -2,14 +2,15 @@ import random
 import torch
 
 
+
 def to_block(inputs, n_nodes):
     '''
     input: (N, H, n_col), n_nodes: (B)
     '''
     blocks = []
-    cnt = 0
     for h in range(inputs.size(1)):
         feat_list = []
+        cnt = 0
         for n in n_nodes:
             feat_list.append(inputs[cnt : cnt + n, h])
             cnt += n
@@ -23,10 +24,10 @@ def unpack_block(inputs, n_col, n_nodes):
     input: (N, H, B*n_col), n_col: int, n_nodes: (B)
     '''
     unblocks = []
-    cnt = 0
-    start_col = 0
     for h in range(inputs.size(1)):
         feat_list = []
+        cnt = 0
+        start_col = 0
         for n in n_nodes:
             feat_list.append(inputs[cnt:cnt + n, h, start_col:start_col + n_col])
             cnt += n
@@ -76,7 +77,7 @@ def full_attention_conv(qs, ks, vs, kernel, n_nodes=None, block_wise=False, outp
             attention_num += vs_sum  # (N, H, D)
 
             # denominator
-            all_ones = torch.ones([ks.shape[0]]).to(ks.device).reshape(-1, qs.shape[1], 1)  # [N, H, 1]
+            all_ones = torch.ones([ks.shape[0], qs.shape[1]]).to(ks.device).unsqueeze(2)  # [N, H, 1]
             one_block = to_block(all_ones, n_nodes) # [N, H, B]
             ks_sum = torch.einsum("lhm,lhb->hmb", k_block, one_block) # [H, B*D, B]
             attention_normalizer = torch.einsum("nhm,hmb->nhb", q_block, ks_sum)  # [N, H, B]
@@ -113,8 +114,7 @@ def full_attention_conv(qs, ks, vs, kernel, n_nodes=None, block_wise=False, outp
                 attention = torch.einsum("nhm,lhm->nlh", qs, ks) / attention_normalizer  # [N, L, H]
 
     if output_attn:
-        attn = None
-        return attn_output, attn
+        return attn_output, attention
     else:
         return attn_output
 
@@ -223,8 +223,7 @@ def full_attention_conv_v1(
                     attention_normalizer  # [N, L, H]
 
     if output_attn:
-        attn = None
-        return attn_output, attn
+        return attn_output, attention
     else:
         return attn_output
 

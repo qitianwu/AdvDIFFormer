@@ -264,70 +264,129 @@ def load_proteins_dataset(data_dir,method, training_species=3, train_ratio=0.5, 
 
     return dataset
 
-
-def load_arxiv_dataset(data_dir, method, train_num=3, train_ratio=0.5, valid_ratio=0.25, inductive=True):
+def load_arxiv_dataset(data_dir, method, train_num=3):
     from ogb.nodeproppred import NodePropPredDataset
 
     ogb_dataset = NodePropPredDataset(name='ogbn-arxiv', root=f'{data_dir}/ogb')
-
-    node_years = ogb_dataset.graph['node_year']
-
     edge_index = torch.as_tensor(ogb_dataset.graph['edge_index'])
     node_feat = torch.as_tensor(ogb_dataset.graph['node_feat'])
-    label = torch.as_tensor(ogb_dataset.labels)
+    label = torch.as_tensor(ogb_dataset.labels).reshape(-1, 1)
+    year = torch.as_tensor(ogb_dataset.graph['node_year']).squeeze(1)
 
-    year_bound = [2014, 2017, 2018, 2019, 2020]
+    year_bound = [[1960, 2011]]
+    year_bound += [[2011, 2014]]
+    year_bound += [[2017, 2018], [2018, 2019], [2019, 2020]]
     env = torch.zeros(label.shape[0])
-    for n in range(node_years.shape[0]):
-        year = int(node_years[n])
-        for i in range(len(year_bound)-1):
-            if year >= year_bound[i+1]:
+    for n in range(year.shape[0]):
+        ye = int(year[n])
+        for i in range(1, len(year_bound)):
+            if ye >= year_bound[i][0]:
                 continue
             else:
                 env[n] = i
                 break
 
-    dataset = Data(x=node_feat, edge_index=edge_index, y=label)
-    dataset.env = env
-    dataset.env_num = len(year_bound)
-    dataset.train_env_num = train_num
+    tr_node_mask = (year <= year_bound[0][1])
+    tr_edge_index, _ = subgraph(tr_node_mask, edge_index, relabel_nodes=True)
+    tr_node_feat = node_feat[tr_node_mask]
+    tr_label = label[tr_node_mask]
+    dataset_tr = Data(x=tr_node_feat, edge_index=tr_edge_index, y=tr_label)
+    dataset_tr.train_idx = torch.arange(tr_node_feat.size(0))
+    dataset_tr.batch = torch.zeros(tr_node_feat.shape[0], dtype=torch.long)
+    dataset_tr.env = env[tr_node_mask]
+    dataset_tr.env_num = len(year_bound)
+    dataset_tr.train_env_num = train_num
 
-    # ind_mask = (node_years < year_bound[0]).squeeze(1)
-    idx = torch.arange(dataset.num_nodes)
+    val_node_mask = (year <= year_bound[1][1])
+    val_edge_index, _ = subgraph(val_node_mask, edge_index, relabel_nodes=True)
+    val_node_feat = node_feat[val_node_mask]
+    val_label = label[val_node_mask]
+    dataset_val = Data(x=val_node_feat, edge_index=val_edge_index, y=val_label)
+    idx = torch.arange(val_node_feat.size(0))
+    val_year = year[val_node_mask]
+    dataset_val.valid_idx = idx[(val_year > year_bound[1][0])]
+    dataset_val.batch = torch.zeros(val_node_feat.shape[0], dtype=torch.long)
 
-    # ind_idx = idx[ind_mask]
-    # idx_ = torch.randperm(ind_idx.size(0))
-    # train_idx_ind = idx_[:int(idx_.size(0) * train_ratio)]
-    # valid_idx_ind = idx_[int(idx_.size(0) * train_ratio): int(idx_.size(0) * (train_ratio + valid_ratio))]
-    # test_idx_ind = idx_[int(idx_.size(0) * (train_ratio + valid_ratio)):]
-    # dataset.train_idx = ind_idx[train_idx_ind]
-    # print('dataset',max(env[dataset.train_idx].long()))
-    # dataset.valid_idx = ind_idx[valid_idx_ind]
-    # dataset.test_in_idx = ind_idx[test_idx_ind]
+    dataset_te = []
+    for i in range(2, len(year_bound)):
+        te_node_mask = (year <= year_bound[i][1])
+        te_edge_index, _ = subgraph(te_node_mask, edge_index, relabel_nodes=True)
+        te_node_feat = node_feat[te_node_mask]
+        te_label = label[te_node_mask]
+        dataset = Data(x=te_node_feat, edge_index=te_edge_index, y=te_label)
+        idx = torch.arange(te_node_feat.size(0))
+        te_year = year[te_node_mask]
+        dataset.test_idx = idx[(te_year > year_bound[i][0])]
+        dataset.batch = torch.zeros(te_node_feat.shape[0], dtype=torch.long)
+        dataset_te.append(dataset)
 
-    # dataset.test_ood_idx = []
-    #
-    # for i in range(train_num, len(year_bound)-1):
-    #     ood_mask_i = ((node_years >= year_bound[i]) * (node_years < year_bound[i+1])).squeeze(1)
-    #     dataset.test_ood_idx.append(idx[ood_mask_i])
+    return dataset_tr, dataset_val, dataset_te
 
-    train_mask = (node_years <= year_bound[0]).squeeze(1)
-    dataset.train_idx = idx[train_mask]
-    valid_mask = ((node_years > year_bound[0]) * (node_years <= year_bound[1])).squeeze(1)
-    dataset.valid_idx = idx[valid_mask]
-    dataset.test_idx = []
-    for i in range(1, len(year_bound) - 1):
-        ood_mask_i = ((node_years > year_bound[i]) * (node_years <= year_bound[i + 1])).squeeze(1)
-        dataset.test_idx.append(idx[ood_mask_i])
 
-    dataset.batch = torch.zeros(node_feat.shape[0], dtype=torch.long)
-
-    if method == 'eerm':
-        A = to_dense_adj(dataset.edge_index)[0].to(torch.int)[dataset.train_idx][:,dataset.train_idx]
-        train_edge_reindex = dense_to_sparse(A)[0]
-        dataset.train_edge_reindex = train_edge_reindex
-
-    return dataset
+#
+# def load_arxiv_dataset(data_dir, method, train_num=3, train_ratio=0.5, valid_ratio=0.25, inductive=True):
+#     from ogb.nodeproppred import NodePropPredDataset
+#
+#     ogb_dataset = NodePropPredDataset(name='ogbn-arxiv', root=f'{data_dir}/ogb')
+#
+#     node_years = ogb_dataset.graph['node_year']
+#
+#     edge_index = torch.as_tensor(ogb_dataset.graph['edge_index'])
+#     node_feat = torch.as_tensor(ogb_dataset.graph['node_feat'])
+#     label = torch.as_tensor(ogb_dataset.labels)
+#
+#     year_bound = [2011, 2014, 2016, 2018, 2020]
+#     env = torch.zeros(label.shape[0])
+#     for n in range(node_years.shape[0]):
+#         year = int(node_years[n])
+#         for i in range(len(year_bound)-1):
+#             if year >= year_bound[i+1]:
+#                 continue
+#             else:
+#                 env[n] = i
+#                 break
+#
+#     dataset = Data(x=node_feat, edge_index=edge_index, y=label)
+#     dataset.env = env
+#     dataset.env_num = len(year_bound)
+#     dataset.train_env_num = train_num
+#
+#     # ind_mask = (node_years < year_bound[0]).squeeze(1)
+#     idx = torch.arange(dataset.num_nodes)
+#
+#     # ind_idx = idx[ind_mask]
+#     # idx_ = torch.randperm(ind_idx.size(0))
+#     # train_idx_ind = idx_[:int(idx_.size(0) * train_ratio)]
+#     # valid_idx_ind = idx_[int(idx_.size(0) * train_ratio): int(idx_.size(0) * (train_ratio + valid_ratio))]
+#     # test_idx_ind = idx_[int(idx_.size(0) * (train_ratio + valid_ratio)):]
+#     # dataset.train_idx = ind_idx[train_idx_ind]
+#     # print('dataset',max(env[dataset.train_idx].long()))
+#     # dataset.valid_idx = ind_idx[valid_idx_ind]
+#     # dataset.test_in_idx = ind_idx[test_idx_ind]
+#
+#     # dataset.test_ood_idx = []
+#     #
+#     # for i in range(train_num, len(year_bound)-1):
+#     #     ood_mask_i = ((node_years >= year_bound[i]) * (node_years < year_bound[i+1])).squeeze(1)
+#     #     dataset.test_ood_idx.append(idx[ood_mask_i])
+#
+#     train_mask = (node_years <= year_bound[0]).squeeze(1)
+#     dataset.train_idx = idx[train_mask]
+#     valid_mask = ((node_years > year_bound[0]) * (node_years <= year_bound[1])).squeeze(1)
+#     dataset.valid_idx = idx[valid_mask]
+#     dataset.test_idx = []
+#     for i in range(1, len(year_bound) - 1):
+#         ood_mask_i = ((node_years > year_bound[i]) * (node_years <= year_bound[i + 1])).squeeze(1)
+#         dataset.test_idx.append(idx[ood_mask_i])
+#
+#     dataset.batch = torch.zeros(node_feat.shape[0], dtype=torch.long)
+#
+#     if method == 'eerm':
+#         A = to_dense_adj(dataset.edge_index)[0].to(torch.int)[dataset.train_idx][:,dataset.train_idx]
+#         train_edge_reindex = dense_to_sparse(A)[0]
+#         dataset.train_edge_reindex = train_edge_reindex
+#
+#     return dataset
 
 
 def load_elliptic_dataset(data_dir, method, train_num=5, train_ratio=0.5, valid_ratio=0.25):
