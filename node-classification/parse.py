@@ -156,6 +156,7 @@ def parser_add_main_args(parser):
     parser.add_argument('--modify_ratio', type=float, default=0.1, help='ratio of edge rewiring for each graph')
     parser.add_argument('--use_block', action='store_true', help='compute all-pair attention within each block')
     parser.add_argument('--rewiring_type', type=str, default='delete', choices=['delete', 'replace'])
+    parser.add_argument('--K_order', type=int, default=3, help='order for gcn conv each layer')
 
     # training
     parser.add_argument('--batch_size', type=int, default=2048)
