@@ -70,6 +70,7 @@ def full_attention_conv(
 
             numerator = torch.matmul(qk_pad, v_pad)[node_mask] + \
                 torch.index_select(v_sum, dim=0, index=batch)
+            # [N, D]
 
             denominator = qk_pad[node_mask].sum(dim=-1)  # [N]
             denominator += torch.index_select(
