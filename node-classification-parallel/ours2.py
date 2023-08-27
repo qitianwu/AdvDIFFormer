@@ -192,7 +192,7 @@ class GloAttnConv(nn.Module):
         # feature transformation
         query = self.Wq(x).reshape(-1, self.num_heads, self.out_channels)
         key = self.Wk(x).reshape(-1, self.num_heads, self.out_channels)
-        value = x.reshape(-1, 1, self.out_channels)
+        value = x.unsqueeze(1).repeat(1, self.num_heads, 1)
 
         if output_attn:
             outputs, attns = full_attention_conv(query, key, value, self.kernel, n_nodes, block_wise, output_attn)  # [N, H, D]
