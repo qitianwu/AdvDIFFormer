@@ -312,3 +312,26 @@ def sparse_mx_to_torch_sparse_tensor(sparse_mx):
     values = torch.from_numpy(sparse_mx.data)
     shape = torch.Size(sparse_mx.shape)
     return torch.sparse.FloatTensor(indices, values, shape)
+
+def print_dataset_info(dataset, name, dataset_val=None, dataset_te=None):
+    c = max(dataset.y.max().item() + 1, dataset.y.shape[1])
+    d = dataset.x.shape[1]
+
+    if dataset_te is None:
+        print(f"dataset {name}: all nodes {dataset.num_nodes} | edges {dataset.edge_index.size(1)} | "
+              + f"classes {c} | feats {d}")
+        print(f"train nodes {dataset.train_idx.shape[0]} | valid nodes {dataset.valid_idx.shape[0]}")
+        m = ""
+        for i in range(len(dataset.test_idx)):
+            m += f"test ood{i + 1} nodes {dataset.test_idx[i].shape[0]} "
+        print(m)
+        print(f'[INFO] env numbers: {dataset.env_num} train env numbers: {dataset.train_env_num}')
+    else:
+        print(f"dataset {name}: " + f"classes {c} | feats {d}")
+        print(f"train data: all nodes {dataset.x.shape[0]} | train nodes {dataset.train_idx.shape[0]} | all edges {dataset.edge_index.size(1)}")
+        print(f"valid data: all nodes {dataset_val.x.shape[0]} | valid nodes {dataset_val.valid_idx.shape[0]} | all edges {dataset_val.edge_index.size(1)}")
+        m = ""
+        for i in range(len(dataset_te)):
+            m += f"test ood{i + 1} data: all nodes {dataset_te[i].x.shape[0]} | test nodes {dataset_te[i].test_idx.shape[0]} | all edges {dataset_te[i].edge_index.size(1)} \n"
+        print(m)
+        # print(f'[INFO] env numbers: {dataset.env_num} train env numbers: {dataset.train_env_num}')

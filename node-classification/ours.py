@@ -244,7 +244,7 @@ class DIFFormer(nn.Module):
         for fc in self.fcs:
             fc.reset_parameters()
 
-    def forward(self, x, edge_index, batch, edge_weight=None, block_wise=False):
+    def forward(self, x, edge_index, batch=None, edge_weight=None, block_wise=False):
 
         if block_wise:
             n_nodes = torch_scatter.scatter(torch.ones_like(batch), batch) # [B]

@@ -252,7 +252,7 @@ class Ours(nn.Module):
         for fc in self.fcs:
             fc.reset_parameters()
 
-    def forward(self, x, edge_index, batch, edge_weight=None, block_wise=False):
+    def forward(self, x, edge_index, batch=None, edge_weight=None, block_wise=False):
 
         if block_wise:
             n_nodes = torch_scatter.scatter(torch.ones_like(batch), batch) # [B]
@@ -272,7 +272,6 @@ class Ours(nn.Module):
         layer_.append(x)
 
         for i in range(self.num_layers):
-            # graph convolution with DIFFormer layer
             x1 = self.attn_convs[i](x, n_nodes, block_wise)
             x2 = gnn_high_order_conv(x, edge_index, self.K_order, edge_weight)
             x = torch.cat([x1, x2], dim=-1) # [N, D * (1+K+H)]

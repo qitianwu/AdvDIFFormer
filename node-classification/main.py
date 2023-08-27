@@ -10,8 +10,9 @@ from torch_scatter import scatter
 from torch_geometric.data import ShaDowKHopSampler
 
 from logger import Logger, save_result
+from data_utils import print_dataset_info
 from dataset import *
-from eval import evaluate_full, eval_acc, eval_rocauc, eval_f1
+from eval import evaluate_multi_graph, evaluate_single_graph, eval_acc, eval_rocauc, eval_f1
 from parse import parse_method, parser_add_main_args
 from model import *
 from ours import *
@@ -46,9 +47,7 @@ elif args.dataset == 'elliptic':
     dataset = load_elliptic_dataset(args.data_dir, args.method, train_num=5)
 # single-graph datasets, divide nodes into train/valid/test
 elif args.dataset == 'arxiv':
-    dataset = load_arxiv_dataset(args.data_dir, args.method, train_num=3)
-elif args.dataset == 'proteins':
-    dataset = load_proteins_dataset(args.data_dir, args.method, training_species=3)
+    dataset, dataset_val, dataset_te = load_arxiv_dataset(args.data_dir, args.method, train_num=3)
 # synthetic datasets, add spurious node features
 elif args.dataset in ('cora', 'citeseer', 'pubmed', 'photo', 'computer'):
     dataset = load_synthetic_dataset(args.data_dir, args.dataset, args.method, train_num=1)
@@ -57,35 +56,39 @@ else:
 
 if len(dataset.y.shape) == 1:
     dataset.y = dataset.y.unsqueeze(1)
+class_num = max(dataset.y.max().item() + 1, dataset.y.shape[1])
+feat_num = dataset.x.shape[1]
 
-# train_env_num = reindex_env(dataset, debug=True)
-c = max(dataset.y.max().item() + 1, dataset.y.shape[1])
-d = dataset.x.shape[1]
-n = dataset.num_nodes
-
-print(f"dataset {args.dataset}: all nodes {dataset.num_nodes} | edges {dataset.edge_index.size(1)} | "
-      + f"classes {c} | feats {d}")
-print(f"train nodes {dataset.train_idx.shape[0]} | valid nodes {dataset.valid_idx.shape[0]}")
-m = ""
-for i in range(len(dataset.test_idx)):
-    m += f"test ood{i+1} nodes {dataset.test_idx[i].shape[0]} "
-print(m)
-print(f'[INFO] env numbers: {dataset.env_num} train env numbers: {dataset.train_env_num}')
+if args.dataset == 'twitch':
+    print_dataset_info(dataset, args.dataset)
+    dataset.x, dataset.y, dataset.edge_index, dataset.env, dataset.batch = \
+        dataset.x.to(device), dataset.y.to(device), dataset.edge_index.to(device), dataset.env.to(
+            device), dataset.batch.to(device)
+elif args.dataset == 'arxiv':
+    print_dataset_info(dataset, args.dataset, dataset_val, dataset_te)
+    dataset.x, dataset.y, dataset.edge_index, dataset.env, dataset.batch = \
+        dataset.x.to(device), dataset.y.to(device), dataset.edge_index.to(device), dataset.env.to(
+            device), dataset.batch.to(device)
+    dataset_val.x, dataset_val.y, dataset_val.edge_index, dataset_val.batch = \
+        dataset_val.x.to(device), dataset_val.y.to(device), dataset_val.edge_index.to(device), dataset_val.batch.to(device)
+    for d in dataset_te:
+        d.x, d.y, d.edge_index, d.batch = \
+        d.x.to(device), d.y.to(device), d.edge_index.to(device), d.batch.to(device)
 
 ### Load method ###
 is_multilabel = args.dataset in ('proteins', 'ppi')
 
 if args.method in ('erm', 'reg', 'dropedge', 'irm', 'mixup', 'groupdro', 'coral', 'dann', 'eerm', 'srgnn'):
-    model = Baseline(d, c, dataset, args, device, dataset.train_env_num, is_multilabel).to(device)
+    model = Baseline(feat_num, class_num, dataset, args, device, dataset.train_env_num, is_multilabel).to(device)
     if args.method == 'srgnn':
         model.srgnn_preprocess(dataset, num = min(dataset.train_idx.shape[0], 5000),beta=args.kmm_beta)
 elif args.method == 'ours':
-    model = DIFFormer(d, args.hidden_channels, c, num_layers=args.num_layers, alpha=args.alpha, dropout=args.dropout,
+    model = DIFFormer(feat_num, args.hidden_channels, class_num, num_layers=args.num_layers, alpha=args.alpha, dropout=args.dropout,
                       num_heads=args.num_heads, kernel=args.kernel,
                       use_bn=args.use_bn, use_residual=args.use_residual,
                       use_weight=args.use_weight).to(device)
 elif args.method == 'ours2':
-    model = Ours(d, args.hidden_channels, c, num_layers=args.num_layers, alpha=args.alpha, dropout=args.dropout,
+    model = Ours(feat_num, args.hidden_channels, class_num, num_layers=args.num_layers, alpha=args.alpha, dropout=args.dropout,
                       num_heads=args.num_heads, kernel=args.kernel, K_order=args.K_order,
                       use_bn=args.use_bn, use_residual=args.use_residual).to(device)
 
@@ -122,9 +125,6 @@ for run in range(args.runs):
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best_val = float('-inf')
 
-    dataset.x, dataset.y, dataset.edge_index, dataset.env, dataset.batch = \
-        dataset.x.to(device), dataset.y.to(device), dataset.edge_index.to(device), dataset.env.to(device), dataset.batch.to(device)
-
     for epoch in range(args.epochs):
         model.train()
         if args.method == 'eerm':
@@ -150,7 +150,10 @@ for run in range(args.runs):
             loss = model.loss_compute(dataset, criterion, args)
             loss.backward()
             optimizer.step()
-        result = evaluate_full(model, dataset, eval_func, args)
+        if args.dataset == 'arxiv':
+            result = evaluate_single_graph(model, dataset, dataset_val, dataset_te, eval_func, args)
+        elif args.dataset == 'twitch':
+            result = evaluate_multi_graph(model, dataset, eval_func, args)
         logger.add_result(run, result)
 
         tr_acc.append(result[0])

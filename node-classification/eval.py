@@ -78,7 +78,7 @@ def evaluate_sampler(model, train_loader, valid_loader, test_loader, eval_func, 
 
 
 @torch.no_grad()
-def evaluate_full(model, dataset, eval_func, args):
+def evaluate_multi_graph(model, dataset, eval_func, args):
     model.eval()
 
     train_idx, valid_idx, test_idx = dataset.train_idx, dataset.valid_idx, dataset.test_idx
@@ -90,10 +90,39 @@ def evaluate_full(model, dataset, eval_func, args):
 
     train_acc = eval_func(y[train_idx], out[train_idx])
     valid_acc = eval_func(y[valid_idx], out[valid_idx])
-    # test_in_acc = eval_func(y[test_in_idx], out[test_in_idx])
     test_accs = []
     for t in test_idx:
         test_accs.append(eval_func(y[t], out[t]))
+    result = [train_acc, valid_acc] + test_accs
+
+    return result
+
+@torch.no_grad()
+def evaluate_single_graph(model, dataset_tr, dataset_val, dataset_te, eval_func, args):
+    model.eval()
+
+    y = dataset_tr.y.cpu()
+    if args.method in ('ours', 'ours2'):
+        out = model(dataset_tr.x, dataset_tr.edge_index, dataset_tr.batch, block_wise=args.use_block).cpu()
+    else:
+        out = model(dataset_tr.x, dataset_tr.edge_index).cpu()
+    train_acc = eval_func(y[dataset_tr.train_idx], out[dataset_tr.train_idx])
+
+    y = dataset_val.y.cpu()
+    if args.method in ('ours', 'ours2'):
+        out = model(dataset_val.x, dataset_val.edge_index, dataset_val.batch, block_wise=args.use_block).cpu()
+    else:
+        out = model(dataset_val.x, dataset_val.edge_index).cpu()
+    valid_acc = eval_func(y[dataset_val.valid_idx], out[dataset_val.valid_idx])
+
+    test_accs = []
+    for d in dataset_te:
+        y = d.y.cpu()
+        if args.method in ('ours', 'ours2'):
+            out = model(d.x, d.edge_index, d.batch, block_wise=args.use_block).cpu()
+        else:
+            out = model(d.x, d.edge_index).cpu()
+        test_accs.append(eval_func(y[d.test_idx], out[d.test_idx]))
     result = [train_acc, valid_acc] + test_accs
 
     return result
