@@ -10,6 +10,26 @@ from data_utils import sys_normalized_adjacency, sparse_mx_to_torch_sparse_tenso
 from torch_sparse import SparseTensor, matmul
 import torch_scatter
 
+def gnn_high_order_conv(x, edge_index, K, edge_weight=None):
+    N = x.shape[0]
+    row, col = edge_index
+    if edge_weight is None:
+        value = torch.ones(edge_index.shape[1], dtype=torch.float).to(x.device)
+    else:
+        value = edge_weight
+    adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(N, N))
+
+    deg = adj_t.sum(dim=1).to(torch.float)
+    deg_inv_sqrt = deg.pow(-0.5)
+    deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+    adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
+
+    xs = [x]
+    for _ in range(1, K + 1):
+        xs += [adj_t @ xs[-1]]
+
+    return torch.cat(xs, dim=1)  # [N, D * (1+K)]
+
 def rewiring(edge_index, batch, ratio, edge_attr=None, type='delete'):
     edge_num, batch_size = edge_index.shape[1], batch.max() + 1
 
@@ -154,78 +174,67 @@ def full_attention_conv(qs, ks, vs, kernel, n_nodes=None, block_wise=False, outp
     else:
         return attn_output
 
-class DIFFormerConv(nn.Module):
+class GloAttnConv(nn.Module):
     '''
-    one DIFFormer layer
+    one global attention layer
     '''
     def __init__(self, in_channels,
                out_channels,
                num_heads,
-               kernel='simple',
-               use_weight=True):
-        super(DIFFormerConv, self).__init__()
+               kernel='simple'):
+        super(GloAttnConv, self).__init__()
         self.Wk = nn.Linear(in_channels, out_channels * num_heads)
         self.Wq = nn.Linear(in_channels, out_channels * num_heads)
-        if use_weight:
-            self.Wv = nn.Linear(in_channels, out_channels * num_heads)
 
         self.out_channels = out_channels
         self.num_heads = num_heads
         self.kernel = kernel
-        self.use_weight = use_weight
 
     def reset_parameters(self):
         self.Wk.reset_parameters()
         self.Wq.reset_parameters()
-        if self.use_weight:
-            self.Wv.reset_parameters()
 
     def forward(self, x, n_nodes=None, block_wise=False, output_attn=False):
         # feature transformation
         query = self.Wq(x).reshape(-1, self.num_heads, self.out_channels)
         key = self.Wk(x).reshape(-1, self.num_heads, self.out_channels)
-        if self.use_weight:
-            value = self.Wv(x).reshape(-1, self.num_heads, self.out_channels)
-        else:
-            value = x.reshape(-1, 1, self.out_channels)
+        value = x.reshape(-1, 1, self.out_channels)
 
         if output_attn:
             outputs, attns = full_attention_conv(query, key, value, self.kernel, n_nodes, block_wise, output_attn)  # [N, H, D]
         else:
             outputs = full_attention_conv(query, key, value, self.kernel, n_nodes, block_wise) # [N, H, D]
 
-        final_output = outputs.mean(dim=1)
+        outputs = outputs.reshape(-1, self.num_heads * self.out_channels)
 
         if output_attn:
-            return final_output, attns
+            return outputs, attns
         else:
-            return final_output
+            return outputs
 
-class DIFFormer(nn.Module):
+class Ours(nn.Module):
     '''
-    DIFFormer model class
+    Ours model class
     x: input node features [N, D]
     edge_index: 2-dim indices of edges [2, E]
     return y_hat predicted logits [N, C]
     '''
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, num_heads=1, kernel='simple',
-                 alpha=0.5, dropout=0.5, use_bn=True, use_residual=True, use_weight=True):
-        super(DIFFormer, self).__init__()
+                    K_order=3, alpha=0.5, dropout=0.5, use_bn=True, use_residual=True):
+        super(Ours, self).__init__()
 
         self.attn_convs = nn.ModuleList()
-        self.gnn_convs = nn.ModuleList()
         self.fcs = nn.ModuleList()
-        self.fcs.append(nn.Linear(in_channels, hidden_channels*2))
+        self.fcs.append(nn.Linear(in_channels, hidden_channels))
         self.bns = nn.ModuleList()
-        self.bns.append(nn.BatchNorm1d(hidden_channels*2))
+        self.bns.append(nn.BatchNorm1d(hidden_channels))
         for i in range(num_layers):
             self.attn_convs.append(
-                DIFFormerConv(hidden_channels*2, hidden_channels, num_heads=num_heads, kernel=kernel, use_weight=use_weight))
-            self.gnn_convs.append(
-                GCNConv(hidden_channels*2, hidden_channels))
-            self.bns.append(nn.BatchNorm1d(hidden_channels*2))
+                GloAttnConv(hidden_channels, hidden_channels, num_heads=num_heads, kernel=kernel))
+            self.fcs.append(nn.Linear(hidden_channels * (K_order+num_heads+1), hidden_channels))
+            self.bns.append(nn.BatchNorm1d(hidden_channels))
 
-        self.fcs.append(nn.Linear(hidden_channels*2, out_channels))
+        self.fcs.append(nn.Linear(hidden_channels, out_channels))
 
         self.dropout = dropout
         self.activation = F.relu
@@ -233,11 +242,10 @@ class DIFFormer(nn.Module):
         self.residual = use_residual
         self.alpha = alpha
         self.num_layers = num_layers
+        self.K_order = K_order
 
     def reset_parameters(self):
         for conv in self.attn_convs:
-            conv.reset_parameters()
-        for conv in self.gnn_convs:
             conv.reset_parameters()
         for bn in self.bns:
             bn.reset_parameters()
@@ -266,11 +274,11 @@ class DIFFormer(nn.Module):
         for i in range(self.num_layers):
             # graph convolution with DIFFormer layer
             x1 = self.attn_convs[i](x, n_nodes, block_wise)
-            x2 = self.gnn_convs[i](x, edge_index)
-            x = torch.cat([x1, x2], dim=-1)
-            # x = (x1 + x2) / 2.
+            x2 = gnn_high_order_conv(x, edge_index, self.K_order, edge_weight)
+            x = torch.cat([x1, x2], dim=-1) # [N, D * (1+K+H)]
+            x = self.fcs[1+i](x)
             if self.residual:
-                x = self.alpha * x + (1-self.alpha) * layer_[i]
+                x += layer_[i]
             if self.use_bn:
                 x = self.bns[i+1](x)
             x = self.activation(x)
@@ -312,10 +320,12 @@ class DIFFormer(nn.Module):
 
                 logits_i = self.forward(d.x, edge_index_i, d.batch, block_wise=args.use_block)[d.train_idx]
                 reg_loss_i = self.sup_loss_calc(y, logits_i, criterion, args)
-                reg_loss_.append(reg_loss_i)
-            var = torch.var(torch.stack(reg_loss_))
-            print(sup_loss, var)
-            loss = sup_loss + args.reg_weight * var
+                # reg_loss_.append(reg_loss_i)
+                reg_loss_.append(torch.relu(reg_loss_i - sup_loss) ** 2)
+            # loss_reg = torch.mean(torch.stack(reg_loss_))
+            reg_loss = torch.mean(torch.stack(reg_loss_))
+            print(sup_loss.data, reg_loss.data)
+            loss = sup_loss + args.reg_weight * reg_loss
         else:
             loss = sup_loss
         return loss

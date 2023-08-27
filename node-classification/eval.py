@@ -83,7 +83,7 @@ def evaluate_full(model, dataset, eval_func, args):
 
     train_idx, valid_idx, test_idx = dataset.train_idx, dataset.valid_idx, dataset.test_idx
     y = dataset.y.cpu()
-    if args.method == 'ours':
+    if args.method in ('ours', 'ours2'):
         out = model(dataset.x, dataset.edge_index, dataset.batch, block_wise=args.use_block).cpu()
     else:
         out = model(dataset.x, dataset.edge_index).cpu()

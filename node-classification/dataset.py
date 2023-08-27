@@ -276,7 +276,7 @@ def load_arxiv_dataset(data_dir, method, train_num=3, train_ratio=0.5, valid_rat
     node_feat = torch.as_tensor(ogb_dataset.graph['node_feat'])
     label = torch.as_tensor(ogb_dataset.labels)
 
-    year_bound = [2014, 2017, 2018, 2019, 2020]
+    year_bound = [2011, 2014, 2016, 2018, 2020]
     env = torch.zeros(label.shape[0])
     for n in range(node_years.shape[0]):
         year = int(node_years[n])

@@ -15,9 +15,7 @@ from eval import evaluate_full, eval_acc, eval_rocauc, eval_f1
 from parse import parse_method, parser_add_main_args
 from model import *
 from ours import *
-
-
-#os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+from ours2 import *
 
 # NOTE: for consistent data splits, see data_utils.rand_train_test_idx
 def fix_seed(seed):
@@ -86,6 +84,10 @@ elif args.method == 'ours':
                       num_heads=args.num_heads, kernel=args.kernel,
                       use_bn=args.use_bn, use_residual=args.use_residual,
                       use_weight=args.use_weight).to(device)
+elif args.method == 'ours2':
+    model = Ours(d, args.hidden_channels, c, num_layers=args.num_layers, alpha=args.alpha, dropout=args.dropout,
+                      num_heads=args.num_heads, kernel=args.kernel, K_order=args.K_order,
+                      use_bn=args.use_bn, use_residual=args.use_residual).to(device)
 
 if args.method != 'mixup':
     if args.dataset in ('proteins', 'ppi', 'elliptic', 'twitch'):
@@ -145,10 +147,7 @@ for run in range(args.runs):
             loss = outer_loss
         else:
             optimizer.zero_grad()
-            if args.method == 'ours':
-                loss = model.loss_compute(dataset, criterion, args)
-            else:
-                loss = model.loss_compute(dataset, criterion, args)
+            loss = model.loss_compute(dataset, criterion, args)
             loss.backward()
             optimizer.step()
         result = evaluate_full(model, dataset, eval_func, args)
