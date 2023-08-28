@@ -4,6 +4,7 @@ import torch.optim as optim
 from modules.GNNs import GNN
 from modules.SAGE import SAGEMol
 from modules.utils import get_device
+from modules.GAT import GATMol
 import torch_geometric
 from tqdm import tqdm
 import argparse
@@ -130,7 +131,7 @@ def main():
     )
 
     parser.add_argument(
-        '--heads', type=int, default=1, help='heads for gat'
+        '--heads', type=int, default=2, help='heads for gat'
     )
 
     args = parser.parse_args()
@@ -203,6 +204,18 @@ def main():
         model = SAGEMol(
             emb_dim=args.emb_dim, num_layer=args.num_layer,
             drop_ratio=args.drop_ratio,
+            num_tasks=dataset.num_tasks, virtual=True
+        ).to(device)
+    elif args.gnn == 'gat':
+        model = GATMol(
+            emb_dim=args.emb_dim, num_layer=args.num_layer,
+            drop_ratio=args.drop_ratio, n_heads=args.heads,
+            num_tasks=dataset.num_tasks, virtual=False
+        ).to(device)
+    elif args.gnn == 'gat-virtual':
+        model = GATMol(
+            emb_dim=args.emb_dim, num_layer=args.num_layer,
+            drop_ratio=args.drop_ratio, n_heads=args.heads,
             num_tasks=dataset.num_tasks, virtual=True
         ).to(device)
     else:
