@@ -262,7 +262,7 @@ class VirtGATMolGraph(torch.nn.Module):
         self, emb_dim, num_layer, drop_ratio=0.5, JK='last',
         residual=False, pooling='mean', n_heads=1
     ):
-        super(VirtSAGEMolGraph, self).__init__()
+        super(VirtGATMolGraph, self).__init__()
         self.pool_method = pooling
         if pooling not in ['attention', 'set2set']:
             self.pool = get_pool(pooling)
