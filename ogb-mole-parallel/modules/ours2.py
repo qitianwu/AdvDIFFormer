@@ -8,27 +8,62 @@ from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
 import torch_scatter
 from modules.utils import get_pool
 
-def gnn_high_order_conv(x, edge_index, K, edge_attr):
 
-    N, Dim = x.shape
-    row, col = edge_index
-    adj_t = torch.zeros((N, N)).to(x.device)
-    adj_t[row, col] = 1
-    deg = adj_t.sum(dim=1)
-    deg_inv_sqrt = deg.pow(-0.5)
-    deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-    adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
+def gnn_high_order_conv(x, edge_index, K, edge_attr):
+    (N, Dim), device = x.shape, x.device
+    deg_i = torch.zeros(N).to(device)
+    deg_j = torch.zeros(N).to(device)
+
+    (row, col), num_edge = edge_index, edge_index.shape[1]
+
+
+    deg_i.index_add_(dim=0, index=row, source=torch.ones(num_edge).to(device))
+    deg_j.index_add_(dim=0, index=col, source=torch.ones(num_edge).to(device))
+
+    deg_inv_sqrt_i = torch.zeros(N).to(device)
+    deg_inv_sqrt_i[deg_i > 0] = deg_i[deg_i > 0] ** (-0.5)
+
+    deg_inv_sqrt_j = torch.zeros(N).to(device)
+    deg_inv_sqrt_j[deg_j > 0] = deg_j[deg_j > 0] ** (-0.5)
+
+    adj_t_val = torch.index_select(deg_inv_sqrt_i, dim=0, index=row)\
+        * torch.index_select(deg_inv_sqrt_j, dim=0, index=col)
+
+    message_edge = torch.zeros_like(x).to(x.device)
+    edge_attr_src = adj_t_val.unsqueeze(-1) * edge_attr 
+    message_edge.scatter_add_(dim=0, index=row.unsqueeze(-1).repeat(1, Dim), src=edge_attr_src)
+
+    adj_t = torch.sparse_coo_tensor(edge_index, adj_t_val, size=(N, N))
 
     xs = [x]
     for _ in range(1, K + 1):
-        message_edge = torch.zeros_like(x).to(x.device)
-        edge_src = adj_t[row, col].unsqueeze(-1) * edge_attr
-        edge_idx = col.unsqueeze(-1).repeat(1, Dim)
-        message_edge.scatter_add_(dim=0, index=edge_idx, src=edge_src)
-        xs += [(adj_t @ x) + message_edge]
-        adj_t = torch.matmul(adj_t, adj_t)
+        xs += [torch.matmul(adj_t, xs[-1]) + message_edge]
 
-    return torch.cat(xs, dim=1)  # [N, D * (1+K)]
+    return torch.cat(xs, dim=1)
+
+    
+
+# def gnn_high_order_conv(x, edge_index, K, edge_attr):
+
+#     N, Dim = x.shape
+#     row, col = edge_index
+#     adj_t = torch.zeros((N, N)).to(x.device)
+#     adj_t[row, col] = 1
+#     deg = adj_t.sum(dim=1)
+#     deg_inv_sqrt = deg.pow(-0.5)
+#     deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+#     adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
+
+#     xs = [x]
+#     for _ in range(1, K + 1):
+#         message_edge = torch.zeros_like(x).to(x.device)
+#         edge_src = adj_t[row, col].unsqueeze(-1) * edge_attr
+#         edge_idx = col.unsqueeze(-1).repeat(1, Dim)
+#         message_edge.scatter_add_(dim=0, index=edge_idx, src=edge_src)
+#         xs += [(adj_t @ x) + message_edge]
+#         adj_t = torch.matmul(adj_t, adj_t)
+
+#     return torch.cat(xs, dim=1)  # [N, D * (1+K)]
 
 def rewiring(edge_index, batch, ratio, edge_attr=None, type='delete'):
     edge_num, batch_size = edge_index.shape[1], batch.max() + 1
