@@ -4,26 +4,29 @@ import math
 import numpy as np
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
-from torch_sparse import SparseTensor
 from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
 import torch_scatter
 from modules.utils import get_pool
 
 def gnn_high_order_conv(x, edge_index, K, edge_attr):
-    N = x.shape[0]
-    row, col = edge_index
-    value = torch.ones(edge_index.shape[1], dtype=torch.float).to(x.device)
-    
-    adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(N, N))
 
-    deg = adj_t.sum(dim=1).to(torch.float)
+    N, Dim = x.shape
+    row, col = edge_index
+    adj_t = torch.zeros((N, N)).to(x.device)
+    adj_t[row, col] = 1
+    deg = adj_t.sum(dim=1)
     deg_inv_sqrt = deg.pow(-0.5)
     deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
     adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
 
-    xs = [x + edge_attr]
+    xs = [x]
     for _ in range(1, K + 1):
-        xs += [adj_t @ xs[-1]]
+        message_edge = torch.zeros_like(x).to(x.device)
+        edge_src = adj_t[row, col].unsqueeze(-1) * edge_attr
+        edge_idx = col.unsqueeze(-1).repeat(1, Dim)
+        message_edge.scatter_add_(dim=0, index=edge_idx, src=edge_src)
+        xs += [(adj_t @ x) + message_edge]
+        adj_t = torch.matmul(adj_t, adj_t)
 
     return torch.cat(xs, dim=1)  # [N, D * (1+K)]
 
@@ -215,7 +218,7 @@ class Ours(nn.Module):
         self.atom_encoder = AtomEncoder(emb_dim)
         self.bond_encoder = torch.nn.ModuleList()
         self.bns = nn.ModuleList()
-        for i in range(num_layers):
+        for i in range(num_layer):
             self.attn_convs.append(
                 GloAttnConv(emb_dim, emb_dim, num_heads=num_heads, kernel=kernel))
             self.fcs.append(nn.Linear(emb_dim * (K_order+num_heads+1), emb_dim))
@@ -244,6 +247,8 @@ class Ours(nn.Module):
 
         self.K_order = K_order
         self.dropout_fun = torch.nn.Dropout(dropout)
+        self.residual = use_residual
+        self.use_bn = use_bn
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -264,22 +269,22 @@ class Ours(nn.Module):
         x = self.atom_encoder(x)
 
         # store as residual link
-        layer_.append(x)
+        layer_ = [x]
 
         for i in range(self.num_layers):
             x1 = self.attn_convs[i](x, n_nodes, block_wise)
             x2 = gnn_high_order_conv(x, edge_index, self.K_order, self.bond_encoder[i](edge_attr))
             x = torch.cat([x1, x2], dim=-1) # [N, D * (1+K+H)]
-            x = self.fcs[1 + i](x)
+            x = self.fcs[i](x)
             if self.residual:
                 x += layer_[i]
             if self.use_bn:
-                x = self.bns[i+1](x)
+                x = self.bns[i](x)
             x = self.dropout_fun(torch.relu(x))
             layer_.append(x)
 
-        x = self.pool(x)
+        x = self.pool(x, batch)
         return self.fcs[-1](x)
-        
+
 
 

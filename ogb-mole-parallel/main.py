@@ -194,7 +194,7 @@ def main():
         help='filename to save model'
     )
 
-    parser.add_argument('--gnn_type', type=str, default='gcn', choices=['gcn', 'sage', 'gat'])
+    parser.add_argument('--gnn_type', type=str, default='gcn', choices=['gcn', 'sage', 'gat', 'DIFF2'])
     parser.add_argument('--num_heads', type=int, default=1,
                         help='number of heads for attention')
     parser.add_argument('--alpha', type=float, default=0.5, help='weight for residual link')
@@ -208,6 +208,7 @@ def main():
     parser.add_argument('--modify_ratio', type=float, default=0.1, help='ratio of edge rewiring for each graph')
     parser.add_argument('--use_block', action='store_true', help='compute all-pair attention within each block')
     parser.add_argument('--rewiring_type', type=str, default='delete', choices=['delete', 'replace'])
+    parser.add_argument('--K_order', type=int, default=3, help='the order of New Impl')
 
 
     args = parser.parse_args()
@@ -248,8 +249,10 @@ def main():
 
     if args.gnn_type == 'DIFF2':
         model = DIF2(
-
-        )
+            num_tasks=dataset.num_tasks, num_layer=args.num_layer, emb_dim=args.emb_dim,
+            pooling='mean', num_heads=args.num_heads, kernel=args.kernel, alpha=args.alpha,
+            dropout=args.dropout, use_bn=args.use_bn, use_residual=args.use_residual, K_order=args.K_order
+        ).to(device)
     else:
         model = DIFFormerMol(
             num_tasks=dataset.num_tasks, num_layer=args.num_layer, emb_dim=args.emb_dim,
