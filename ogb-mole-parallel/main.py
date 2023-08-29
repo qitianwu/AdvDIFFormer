@@ -4,6 +4,7 @@ import torch.optim as optim
 from modules.GNNs import GNN
 from modules.SAGE import SAGEMol
 from modules.ours import DIFFormerMol
+from modules.ours2 import Ours as DIF2
 from modules.utils import get_device
 import torch_geometric
 from tqdm import tqdm
@@ -245,11 +246,16 @@ def main():
         shuffle=False, num_workers=args.num_workers
     )
 
-    model = DIFFormerMol(
-        num_tasks=dataset.num_tasks, num_layer=args.num_layer, emb_dim=args.emb_dim,
-        JK='last', pooling = 'mean', gnn_type=args.gnn_type, num_heads=args.num_heads, kernel=args.kernel,
-        alpha=args.alpha, dropout=args.dropout, use_bn=args.use_bn, use_residual=args.use_residual, use_weight=args.use_weight
-    ).to(device)
+    if args.gnn_type == 'DIFF2':
+        model = DIF2(
+
+        )
+    else:
+        model = DIFFormerMol(
+            num_tasks=dataset.num_tasks, num_layer=args.num_layer, emb_dim=args.emb_dim,
+            JK='last', pooling = 'mean', gnn_type=args.gnn_type, num_heads=args.num_heads, kernel=args.kernel,
+            alpha=args.alpha, dropout=args.dropout, use_bn=args.use_bn, use_residual=args.use_residual, use_weight=args.use_weight
+        ).to(device)
     
 
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
