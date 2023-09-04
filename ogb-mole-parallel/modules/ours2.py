@@ -4,28 +4,66 @@ import math
 import numpy as np
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
-from torch_sparse import SparseTensor
+from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
 import torch_scatter
+from modules.utils import get_pool
 
-def gnn_high_order_conv(x, edge_index, K, edge_weight=None):
-    N = x.shape[0]
-    row, col = edge_index
-    if edge_weight is None:
-        value = torch.ones(edge_index.shape[1], dtype=torch.float).to(x.device)
-    else:
-        value = edge_weight
-    adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(N, N))
 
-    deg = adj_t.sum(dim=1).to(torch.float)
-    deg_inv_sqrt = deg.pow(-0.5)
-    deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-    adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
+def gnn_high_order_conv(x, edge_index, K, edge_attr):
+    (N, Dim), device = x.shape, x.device
+    deg_i = torch.zeros(N).to(device)
+    deg_j = torch.zeros(N).to(device)
+
+    (row, col), num_edge = edge_index, edge_index.shape[1]
+
+
+    deg_i.index_add_(dim=0, index=row, source=torch.ones(num_edge).to(device))
+    deg_j.index_add_(dim=0, index=col, source=torch.ones(num_edge).to(device))
+
+    deg_inv_sqrt_i = torch.zeros(N).to(device)
+    deg_inv_sqrt_i[deg_i > 0] = deg_i[deg_i > 0] ** (-0.5)
+
+    deg_inv_sqrt_j = torch.zeros(N).to(device)
+    deg_inv_sqrt_j[deg_j > 0] = deg_j[deg_j > 0] ** (-0.5)
+
+    adj_t_val = torch.index_select(deg_inv_sqrt_i, dim=0, index=row)\
+        * torch.index_select(deg_inv_sqrt_j, dim=0, index=col)
+
+    message_edge = torch.zeros_like(x).to(x.device)
+    edge_attr_src = adj_t_val.unsqueeze(-1) * edge_attr 
+    message_edge.scatter_add_(dim=0, index=row.unsqueeze(-1).repeat(1, Dim), src=edge_attr_src)
+
+    adj_t = torch.sparse_coo_tensor(edge_index, adj_t_val, size=(N, N))
 
     xs = [x]
     for _ in range(1, K + 1):
-        xs += [adj_t @ xs[-1]]
+        xs += [torch.matmul(adj_t, xs[-1]) + message_edge]
 
-    return torch.cat(xs, dim=1)  # [N, D * (1+K)]
+    return torch.cat(xs, dim=1)
+
+    
+
+# def gnn_high_order_conv(x, edge_index, K, edge_attr):
+
+#     N, Dim = x.shape
+#     row, col = edge_index
+#     adj_t = torch.zeros((N, N)).to(x.device)
+#     adj_t[row, col] = 1
+#     deg = adj_t.sum(dim=1)
+#     deg_inv_sqrt = deg.pow(-0.5)
+#     deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+#     adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
+
+#     xs = [x]
+#     for _ in range(1, K + 1):
+#         message_edge = torch.zeros_like(x).to(x.device)
+#         edge_src = adj_t[row, col].unsqueeze(-1) * edge_attr
+#         edge_idx = col.unsqueeze(-1).repeat(1, Dim)
+#         message_edge.scatter_add_(dim=0, index=edge_idx, src=edge_src)
+#         xs += [(adj_t @ x) + message_edge]
+#         adj_t = torch.matmul(adj_t, adj_t)
+
+#     return torch.cat(xs, dim=1)  # [N, D * (1+K)]
 
 def rewiring(edge_index, batch, ratio, edge_attr=None, type='delete'):
     edge_num, batch_size = edge_index.shape[1], batch.max() + 1
@@ -203,37 +241,50 @@ class GloAttnConv(nn.Module):
         else:
             return outputs
 
-class Ours(nn.Module):
-    '''
-    Ours model class
-    x: input node features [N, D]
-    edge_index: 2-dim indices of edges [2, E]
-    return y_hat predicted logits [N, C]
-    '''
-    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, num_heads=1, kernel='simple',
-                    K_order=3, alpha=0.5, dropout=0.5, use_bn=True, use_residual=True):
-        super(Ours, self).__init__()
 
+class Ours(nn.Module):
+    def __init__(
+        self, emb_dim, num_layer, num_tasks, num_heads=1, kernel='simple', K_order=3, 
+        alpha=0.5, dropout=0.5, use_bn=True, use_residual=True, pooling='mean'
+    ):
+        super(Ours, self).__init__()
         self.attn_convs = nn.ModuleList()
         self.fcs = nn.ModuleList()
-        self.fcs.append(nn.Linear(in_channels, hidden_channels))
+        self.atom_encoder = AtomEncoder(emb_dim)
+        self.bond_encoder = torch.nn.ModuleList()
         self.bns = nn.ModuleList()
-        self.bns.append(nn.BatchNorm1d(hidden_channels))
-        for i in range(num_layers):
+        for i in range(num_layer):
             self.attn_convs.append(
-                GloAttnConv(hidden_channels, hidden_channels, num_heads=num_heads, kernel=kernel))
-            self.fcs.append(nn.Linear(hidden_channels * (K_order+num_heads+1), hidden_channels))
-            self.bns.append(nn.BatchNorm1d(hidden_channels))
+                GloAttnConv(emb_dim, emb_dim, num_heads=num_heads, kernel=kernel))
+            self.fcs.append(nn.Linear(emb_dim * (K_order+num_heads+1), emb_dim))
+            self.bns.append(nn.LayerNorm(emb_dim))
+            self.bond_encoder.append(BondEncoder(emb_dim))
 
-        self.fcs.append(nn.Linear(hidden_channels, out_channels))
 
-        self.dropout = dropout
-        self.activation = F.relu
-        self.use_bn = use_bn
-        self.residual = use_residual
-        self.alpha = alpha
-        self.num_layers = num_layers
+        if pooling not in ['attention', 'set2set']:
+            self.pool = get_pool(pooling)
+        elif pooling == 'attention':
+            gate = torch.nn.Sequential(
+                torch.nn.Linear(emb_dim, 2 * emb_dim),
+                torch.nn.ReLU(),
+                torch.nn.Linear(emb_dim * 2, 1)
+            )
+            self.pool = torch_geometric.nn.GlobalAttention(gate_nn=gate)
+        else:
+            self.pool = torch_geometric.nn.Set2Set(emb_dim, processing_steps=2)
+
+        if pooling == 'set2set':
+            self.fcs.append(torch.nn.Linear(emb_dim * 2, num_tasks))
+        else:
+            self.fcs.append(torch.nn.Linear(emb_dim, num_tasks))
+
+        self.num_layers = num_layer
+
         self.K_order = K_order
+        self.dropout_fun = torch.nn.Dropout(dropout)
+        self.residual = use_residual
+        self.use_bn = use_bn
+        self.reset_parameters()
 
     def reset_parameters(self):
         for conv in self.attn_convs:
@@ -243,79 +294,32 @@ class Ours(nn.Module):
         for fc in self.fcs:
             fc.reset_parameters()
 
-    def forward(self, x, edge_index, batch=None, edge_weight=None, block_wise=False):
+    def forward(self, x, edge_index, edge_attr, batch, block_wise=False):
 
         if block_wise:
             n_nodes = torch_scatter.scatter(torch.ones_like(batch), batch) # [B]
         else:
             n_nodes = None
 
-        layer_ = []
-
-        # input MLP layer
-        x = self.fcs[0](x)
-        if self.use_bn:
-            x = self.bns[0](x)
-        x = self.activation(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.atom_encoder(x)
 
         # store as residual link
-        layer_.append(x)
+        layer_ = [x]
 
         for i in range(self.num_layers):
             x1 = self.attn_convs[i](x, n_nodes, block_wise)
-            x2 = gnn_high_order_conv(x, edge_index, self.K_order, edge_weight)
+            x2 = gnn_high_order_conv(x, edge_index, self.K_order, self.bond_encoder[i](edge_attr))
             x = torch.cat([x1, x2], dim=-1) # [N, D * (1+K+H)]
-            x = self.fcs[1+i](x)
+            x = self.fcs[i](x)
             if self.residual:
                 x += layer_[i]
             if self.use_bn:
-                x = self.bns[i+1](x)
-            x = self.activation(x)
-            x = F.dropout(x, p=self.dropout, training=self.training)
+                x = self.bns[i](x)
+            x = self.dropout_fun(torch.relu(x))
             layer_.append(x)
 
-        # output MLP layer
-        x_out = self.fcs[-1](x)
-        return x_out
+        x = self.pool(x, batch)
+        return self.fcs[-1](x)
 
-    def sup_loss_calc(self, y, pred, criterion, args):
-        if args.dataset in ('twitch', 'elliptic', 'ppi', 'proteins'):
-            if y.shape[1] == 1:
-                true_label = F.one_hot(y, y.max() + 1).squeeze(1)
-            else:
-                true_label = y
-            loss = criterion(pred, true_label.squeeze(1).to(torch.float))
-        else:
-            out = F.log_softmax(pred, dim=1)
-            target = y.squeeze(1)
-            loss = criterion(out, target)
-        return loss
 
-    def print_weight(self):
-        for i, con in enumerate(self.convs):
-            weights = con.weights[:, :64, :].detach().cpu().numpy()
-            np.save(f'weights{i}.npy', weights)
 
-    # rewiring as augmentation
-    def loss_compute(self, d, criterion, args):
-        logits = self.forward(d.x, d.edge_index, d.batch, block_wise=args.use_block)[d.train_idx]
-        y = d.y[d.train_idx]
-        sup_loss = self.sup_loss_calc(y, logits, criterion, args)
-        if args.use_reg:
-            reg_loss_ = []
-            for i in range(args.num_aug_branch):
-
-                edge_index_i = rewiring(d.edge_index.clone(), d.batch, args.modify_ratio, type=args.rewiring_type)
-
-                logits_i = self.forward(d.x, edge_index_i, d.batch, block_wise=args.use_block)[d.train_idx]
-                reg_loss_i = self.sup_loss_calc(y, logits_i, criterion, args)
-                # reg_loss_.append(reg_loss_i)
-                reg_loss_.append(torch.relu(reg_loss_i - sup_loss) ** 2)
-            # loss_reg = torch.mean(torch.stack(reg_loss_))
-            reg_loss = torch.mean(torch.stack(reg_loss_))
-            print(sup_loss.data, reg_loss.data)
-            loss = sup_loss + args.reg_weight * reg_loss
-        else:
-            loss = sup_loss
-        return loss
