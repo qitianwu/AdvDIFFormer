@@ -1,4 +1,5 @@
-现在ours3有两种实现，分别对应solver == 'series'和'inverse'，模型对应使用Chebyshev近似求解PDE方程
+现在的ours3是我们模型的最终实现，对应使用Chebyshev近似求解PDE方程。
+不同的近似方法具体对应了两种实现，分别是solver == 'series'和'inverse'。
 
 模型层面的参数有
 num_layers：控制带参的模型层数（优先考虑固定为1，此时PDE给出的是完整的diffusion轨迹）
