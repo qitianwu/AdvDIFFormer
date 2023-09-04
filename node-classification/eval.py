@@ -1,13 +1,18 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from sklearn.metrics import roc_auc_score, f1_score
+from sklearn.metrics import roc_auc_score, f1_score, mean_squared_error
+
+def eval_mae(y_true, y_pred):
+    y_true = y_true.detach().cpu().numpy()
+    y_pred = y_pred.detach().cpu().numpy()
+    error = mean_squared_error(y_true, y_pred, squared=False)
+    return error
 
 def eval_f1(y_true, y_pred):
     y_true = y_true.detach().cpu().numpy()
     y_pred = y_pred.argmax(dim=-1, keepdim=True).detach().cpu().numpy()
     f1 = f1_score(y_true, y_pred, average='macro')
-    # macro_f1 = f1_score(y_true, y_pred, average='macro')
     return f1
 
 
@@ -83,7 +88,7 @@ def evaluate_multi_graph(model, dataset, eval_func, args):
 
     train_idx, valid_idx, test_idx = dataset.train_idx, dataset.valid_idx, dataset.test_idx
     y = dataset.y.cpu()
-    if args.method in ('ours', 'ours2'):
+    if args.use_block:
         out = model(dataset.x, dataset.edge_index, dataset.batch, block_wise=args.use_block).cpu()
     else:
         out = model(dataset.x, dataset.edge_index).cpu()
@@ -102,14 +107,14 @@ def evaluate_single_graph(model, dataset_tr, dataset_val, dataset_te, eval_func,
     model.eval()
 
     y = dataset_tr.y.cpu()
-    if args.method in ('ours', 'ours2'):
+    if args.use_block:
         out = model(dataset_tr.x, dataset_tr.edge_index, dataset_tr.batch, block_wise=args.use_block).cpu()
     else:
         out = model(dataset_tr.x, dataset_tr.edge_index).cpu()
     train_acc = eval_func(y[dataset_tr.train_idx], out[dataset_tr.train_idx])
 
     y = dataset_val.y.cpu()
-    if args.method in ('ours', 'ours2'):
+    if args.use_block:
         out = model(dataset_val.x, dataset_val.edge_index, dataset_val.batch, block_wise=args.use_block).cpu()
     else:
         out = model(dataset_val.x, dataset_val.edge_index).cpu()
@@ -118,7 +123,7 @@ def evaluate_single_graph(model, dataset_tr, dataset_val, dataset_te, eval_func,
     test_accs = []
     for d in dataset_te:
         y = d.y.cpu()
-        if args.method in ('ours', 'ours2'):
+        if args.use_block:
             out = model(d.x, d.edge_index, d.batch, block_wise=args.use_block).cpu()
         else:
             out = model(d.x, d.edge_index).cpu()

@@ -70,13 +70,14 @@ def parser_add_main_args(parser):
     parser.add_argument('--dataset', type=str, default='cora')
     parser.add_argument('--data_dir', type=str,
                         default='../../../OODgraph-GNNSafe/data/')
+    parser.add_argument('--syn_type', type=str, choices=['edge', 'block', 'both'], default='edge')
     parser.add_argument('--device', type=int, default=0,
                         help='which gpu to use if any (default: 0)')
     parser.add_argument('--cpu', action='store_true')
     parser.add_argument('--seed', type=int, default=123)
     parser.add_argument('--runs', type=int, default=5,
                         help='number of distinct runs')
-    parser.add_argument('--epochs', type=int, default=500)
+    parser.add_argument('--epochs', type=int, default=1500)
 
     # model network
     parser.add_argument('--method', type=str, default='erm')
@@ -135,8 +136,8 @@ def parser_add_main_args(parser):
                         help='steps for graph learner before one step for GNN')
     parser.add_argument('--num_sample', type=int, default=5,
                         help='num of samples for each node with graph edit')
-    parser.add_argument('--beta', type=float, default=2.0,
-                        help='weight for mean of risks from multiple domains')
+    # parser.add_argument('--beta', type=float, default=2.0,
+    #                     help='weight for mean of risks from multiple domains')
     parser.add_argument('--lr_a', type=float, default=0.005,
                         help='learning rate for graph edit model')
 
@@ -157,6 +158,9 @@ def parser_add_main_args(parser):
     parser.add_argument('--use_block', action='store_true', help='compute all-pair attention within each block')
     parser.add_argument('--rewiring_type', type=str, default='delete', choices=['delete', 'replace'])
     parser.add_argument('--K_order', type=int, default=3, help='order for gcn conv each layer')
+    parser.add_argument('--beta', type=float, default=0.5, help='weight for local and global prop')
+    parser.add_argument('--theta', type=float, default=0., help='weight for identity mapping in Laplacian prop')
+    parser.add_argument('--solver', type=str, default='series', choices=['series', 'inverse'])
 
     # training
     parser.add_argument('--batch_size', type=int, default=2048)

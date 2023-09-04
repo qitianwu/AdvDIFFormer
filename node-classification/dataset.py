@@ -9,12 +9,14 @@ from sklearn.preprocessing import label_binarize
 import torch_geometric.transforms as T
 from data_utils import even_quantile_labels, to_sparse_tensor
 
-from torch_geometric.datasets import Planetoid, Amazon, Coauthor, Twitch, PPI, Reddit
+from torch_geometric.datasets import Planetoid, Amazon, Coauthor, Twitch, PPI, Reddit, StochasticBlockModelDataset
 from torch_geometric.transforms import NormalizeFeatures, RadiusGraph
 from torch_geometric.data import Data, Batch
 from torch_geometric.utils import stochastic_blockmodel_graph, subgraph, homophily, to_dense_adj, dense_to_sparse
 
 from torch_geometric.nn import GCNConv, SGConv, SAGEConv, GATConv
+from encoders import MLP, GCN
+from difformer import DIFFormer
 
 import pickle as pkl
 import os
@@ -72,12 +74,13 @@ def load_twitch(data_dir, lang):
 
     return A, label, features
 
-def load_twitch_dataset(data_dir, method, train_num=1, train_ratio=0.5, valid_ratio=0.25):
+def load_twitch_dataset(data_dir, method, train_num=1):
     transform = T.NormalizeFeatures()
     sub_graphs = ['DE', 'ENGB', 'ES', 'FR', 'PTBR', 'RU', 'TW']
-    x_list, edge_index_list, y_list, env_list = [], [], [], []
-    node_idx_list, batch_list = [], []
-    idx_shift = 0
+    # x_list, edge_index_list, y_list, env_list = [], [], [], []
+    # node_idx_list, batch_list = [], []
+    # idx_shift = 0
+    dataset_te = []
     for i, g in enumerate(sub_graphs):
         # torch_dataset = Twitch(root=f'{data_dir}Twitch',
         #                       name=g, transform=transform)
@@ -85,46 +88,53 @@ def load_twitch_dataset(data_dir, method, train_num=1, train_ratio=0.5, valid_ra
         A, label, features = load_twitch(data_dir, g)
         edge_index = torch.tensor(A.nonzero(), dtype=torch.long)
         x = torch.tensor(features, dtype=torch.float)
-        y = torch.tensor(label)
-        num_nodes = x.shape[0]
-        x_list.append(x)
-        y_list.append(y)
-        edge_index_list.append(edge_index + idx_shift)
-        env_list.append(torch.ones(x.size(0)) * i)
-        node_idx_list.append(torch.arange(num_nodes) + idx_shift)
-        batch_list.append(torch.zeros(num_nodes) + i)
-        idx_shift += num_nodes
-    x = torch.cat(x_list, dim=0)
-    y = torch.cat(y_list, dim=0)
-    edge_index = torch.cat(edge_index_list, dim=1)
-    env = torch.cat(env_list, dim=0)
-    dataset = Data(x=x, edge_index=edge_index, y=y)
-    dataset.env = env
-    dataset.env_num = len(sub_graphs)
-    dataset.train_env_num = train_num
-    dataset.batch = torch.cat(batch_list, dim=0).long()
+        y = torch.tensor(label).reshape(-1, 1)
+        if i == 0:
+            dataset_tr = Data(x=x, edge_index=edge_index, y=y)
+            dataset_tr.train_env_num = train_num
+            dataset_tr.train_idx = torch.arange(x.shape[0])
+            dataset_tr.batch = torch.zeros(x.shape[0], dtype=torch.long)
+            dataset_tr.env = torch.zeros(x.shape[0])
+        elif i == 1:
+            dataset_val = Data(x=x, edge_index=edge_index, y=y)
+            dataset_val.valid_idx = torch.arange(x.shape[0])
+            dataset_val.batch = torch.zeros(x.shape[0], dtype=torch.long)
+        else:
+            dataset = Data(x=x, edge_index=edge_index, y=y)
+            dataset.test_idx = torch.arange(x.shape[0])
+            dataset.batch = torch.zeros(x.shape[0], dtype=torch.long)
+            dataset_te.append(dataset)
+        # x_list.append(x)
+        # y_list.append(y)
+        # edge_index_list.append(edge_index + idx_shift)
+        # env_list.append(torch.ones(x.size(0)) * i)
+        # node_idx_list.append(torch.arange(num_nodes) + idx_shift)
+        # batch_list.append(torch.zeros(num_nodes) + i)
+        # idx_shift += num_nodes
+    # x = torch.cat(x_list, dim=0)
+    # y = torch.cat(y_list, dim=0)
+    # edge_index = torch.cat(edge_index_list, dim=1)
+    # env = torch.cat(env_list, dim=0)
+    # dataset = Data(x=x, edge_index=edge_index, y=y)
+    # dataset.env = env
+    # dataset.env_num = len(sub_graphs)
+    # dataset.train_env_num = train_num
+    # dataset.batch = torch.cat(batch_list, dim=0).long()
 
-    assert (train_num <= 5)
+    # assert (train_num <= 5)
+    #
+    # ind_idx = torch.cat(node_idx_list[:train_num], dim=0)
+    # idx = torch.randperm(ind_idx.size(0))
+    # dataset.train_idx = node_idx_list[0]
+    # dataset.valid_idx = node_idx_list[1]
+    # dataset.test_idx = node_idx_list[2:]
+    #
+    # if method == 'eerm':
+    #     A = to_dense_adj(dataset.edge_index)[0].to(torch.int)[dataset.train_idx][:,dataset.train_idx]
+    #     train_edge_reindex = dense_to_sparse(A)[0]
+    #     dataset.train_edge_reindex = train_edge_reindex
 
-    ind_idx = torch.cat(node_idx_list[:train_num], dim=0)
-    idx = torch.randperm(ind_idx.size(0))
-    # train_idx_ind = idx[:int(idx.size(0) * train_ratio)]
-    # valid_idx_ind = idx[int(idx.size(0) * train_ratio) : int(idx.size(0) * (train_ratio + valid_ratio))]
-    # test_idx_ind = idx[int(idx.size(0) * (train_ratio + valid_ratio)):]
-    # dataset.train_idx = ind_idx[train_idx_ind]
-    # dataset.valid_idx = ind_idx[valid_idx_ind]
-    # dataset.test_in_idx = ind_idx[test_idx_ind]
-    # dataset.test_ood_idx = node_idx_list[-1]] if train_num >= 4 else node_idx_list[train_num:]
-    dataset.train_idx = node_idx_list[0]
-    dataset.valid_idx = node_idx_list[1]
-    dataset.test_idx = node_idx_list[2:]
-
-    if method == 'eerm':
-        A = to_dense_adj(dataset.edge_index)[0].to(torch.int)[dataset.train_idx][:,dataset.train_idx]
-        train_edge_reindex = dense_to_sparse(A)[0]
-        dataset.train_edge_reindex = train_edge_reindex
-
-    return dataset
+    return dataset_tr, dataset_val, dataset_te
 
 def load_synthetic_dataset(data_dir, name, method, env_num=6, train_num=1, train_ratio=0.5, valid_ratio=0.25):
     transform = T.NormalizeFeatures()
@@ -210,60 +220,6 @@ def load_synthetic_dataset(data_dir, name, method, env_num=6, train_num=1, train
 
     return dataset
 
-def load_proteins_dataset(data_dir,method, training_species=3, train_ratio=0.5, valid_ratio=0.25, inductive=True):
-    from ogb.nodeproppred import NodePropPredDataset
-
-    ogb_dataset = NodePropPredDataset(name='ogbn-proteins', root=f'{data_dir}/ogb')
-
-    edge_index = torch.as_tensor(ogb_dataset.graph['edge_index'])
-    edge_feat = torch.as_tensor(ogb_dataset.graph['edge_feat'])
-    label = torch.as_tensor(ogb_dataset.labels)
-
-    edge_index_ = to_sparse_tensor(edge_index, edge_feat, ogb_dataset.graph['num_nodes'])
-    node_feat = edge_index_.mean(dim=1)
-
-    node_species = torch.as_tensor(ogb_dataset.graph['node_species'])
-
-    dataset = Data(x=node_feat, edge_index=edge_index, y=label)
-
-    species = node_species.unique()
-    m = {}
-    for i in range(species.shape[0]):
-        m[int(species[i])] = i
-    env = torch.zeros(dataset.num_nodes)
-    for i in range(dataset.num_nodes):
-        env[i] = m[int(node_species[i])]
-    dataset.env = torch.as_tensor(env, dtype=torch.long)
-    dataset.env_num = node_species.unique().size(0)
-    dataset.train_env_num = training_species
-
-    species_t = node_species.unique()[training_species]
-    ind_mask = (node_species < species_t).squeeze(1)
-    idx = torch.arange(dataset.num_nodes)
-    ind_idx = idx[ind_mask]
-    idx_ = torch.randperm(ind_idx.size(0))
-    train_idx_ind = idx_[:int(idx_.size(0) * train_ratio)]
-    valid_idx_ind = idx_[int(idx_.size(0) * train_ratio): int(idx_.size(0) * (train_ratio + valid_ratio))]
-    test_idx_ind = idx_[int(idx_.size(0) * (train_ratio + valid_ratio)):]
-    dataset.train_idx = ind_idx[train_idx_ind]
-    dataset.valid_idx = ind_idx[valid_idx_ind]
-    dataset.test_in_idx = ind_idx[test_idx_ind]
-
-    dataset.test_ood_idx = []
-    for i in range(training_species, node_species.unique().size(0)):
-        species_t = node_species.unique()[i]
-        ood_mask_i = (node_species == species_t).squeeze(1)
-        dataset.test_ood_idx.append(idx[ood_mask_i])
-
-    dataset.batch = torch.zeros(node_feat.shape[0], dtype=torch.long)
-
-    if method == 'eerm':
-        A = to_dense_adj(dataset.edge_index)[0].to(torch.int)[dataset.train_idx][:,dataset.train_idx]
-        train_edge_reindex = dense_to_sparse(A)[0]
-        dataset.train_edge_reindex = train_edge_reindex
-
-    return dataset
-
 def load_arxiv_dataset(data_dir, method, train_num=3):
     from ogb.nodeproppred import NodePropPredDataset
 
@@ -273,8 +229,8 @@ def load_arxiv_dataset(data_dir, method, train_num=3):
     label = torch.as_tensor(ogb_dataset.labels).reshape(-1, 1)
     year = torch.as_tensor(ogb_dataset.graph['node_year']).squeeze(1)
 
-    year_bound = [[1960, 2011]]
-    year_bound += [[2011, 2014]]
+    year_bound = [[1960, 2014]]
+    year_bound += [[2014, 2017]]
     year_bound += [[2017, 2018], [2018, 2019], [2019, 2020]]
     env = torch.zeros(label.shape[0])
     for n in range(year.shape[0]):
@@ -388,86 +344,146 @@ def load_arxiv_dataset(data_dir, method, train_num=3):
 #
 #     return dataset
 
+# @torch.no_grad()
+# def create_synthetic_dataset(data_dir, num_nodes, feat_dim, block_num, env_num, syn_type='edge'):
+#
+#     p_ii = 0.1 - torch.arange(0, 0.1, 0.1 / env_num)
+#     p_ij = 0.01 + torch.arange(0, 0.1, 0.1 / env_num)
+#     # interval = num_nodes // block_num
+#     # block_sizes = [interval for _ in range(block_num-1)] + [num_nodes%block_num+interval]
+#
+#     latents = torch.zeros(num_nodes, 1).uniform_()
+#     blocks = torch.zeros(num_nodes, dtype=torch.long)
+#
+#     cnt, interval = 0., 1.0 / block_num
+#     for c in range(block_num):
+#         mask = (latents[:, 0] >= cnt) * (latents[:, 0] < (cnt + interval))
+#         blocks[mask] = c
+#         cnt += interval
+#
+#     f_x = MLP(1, feat_dim, feat_dim, 2)
+#     # f_y = GCN(1, feat_dim, 1, 1)
+#     f_y = DIFFormer(1, feat_dim, 1, 1)
+#
+#     node_feat = f_x(latents)
+#
+#     edge_probs = torch.ones((block_num, block_num)) * p_ij[0]
+#     edge_probs[torch.arange(block_num), torch.arange(block_num)] = p_ii[0]
+#     row, col = torch.combinations(torch.arange(num_nodes), r=2).t()
+#     mask = torch.bernoulli(edge_probs[blocks[row], blocks[col]]).to(torch.bool)
+#     edge_index = torch.stack([row[mask], col[mask]], dim=0).to(torch.long)
+#
+#     node_label = f_y(latents, edge_index)
+#
+#     d = Data(x=node_feat, edge_index=edge_index, y=node_label)
+#     d.env = torch.ones(num_nodes).to(torch.long) * 0
+#     d.batch = torch.zeros(num_nodes).to(torch.long)
+#     d.y = d.y.reshape(-1, 1)
+#     dataset_list = [d]
+#
+#     def gen_dataset(env_id):
+#
+#         edge_probs = torch.ones((block_num, block_num)) * p_ij[env_id]
+#         edge_probs[torch.arange(block_num), torch.arange(block_num)] = p_ii[env_id]
+#         row, col = torch.combinations(torch.arange(num_nodes), r=2).t()
+#         mask = torch.bernoulli(edge_probs[blocks[row], blocks[col]]).to(torch.bool)
+#         edge_index = torch.stack([row[mask], col[mask]], dim=0).to(torch.long)
+#         d = Data(x=node_feat, edge_index=edge_index, y=node_label)
+#
+#         # file_dir = data_dir + f'{env_id}'
+#         # dataset = StochasticBlockModelDataset(file_dir, block_sizes, edge_probs, num_channels=feat_dim)
+#         # d = dataset[0]
+#
+#         d.env = torch.ones(num_nodes).to(torch.long) * env_id
+#         d.batch = torch.zeros(num_nodes).to(torch.long)
+#         d.y = d.y.reshape(-1, 1)
+#
+#         return d
+#
+#     dataset_list += [gen_dataset(env_id=i) for i in range(1, env_num)]
+#     return dataset_list
 
-def load_elliptic_dataset(data_dir, method, train_num=5, train_ratio=0.5, valid_ratio=0.25):
-    sub_graphs = range(0, 49)
-    x_list, edge_index_list, y_list, mask_list, env_list = [], [], [], [], []
-    node_idx_list, batch_list = [], []
-    idx_shift = 0
-    for i in sub_graphs:
-        result = pkl.load(open('{}/elliptic/{}.pkl'.format(data_dir, i), 'rb'))
-        A, label, features = result
-        edge_index = torch.tensor(A.nonzero(), dtype=torch.long)
-        x = torch.tensor(features, dtype=torch.float)
-        y = torch.tensor(label)
 
-        x_list.append(x)
-        y_list.append(y)
-        mask = (y >= 0)
-        edge_index_list.append(edge_index + idx_shift)
-        env_list.append(torch.ones(x.size(0)) * i)
-        node_idx_list.append(torch.arange(x.shape[0])[mask] + idx_shift)
-        batch_list.append(torch.zeros(x.shape[0]) + i)
+@torch.no_grad()
+def create_synthetic_dataset(num_nodes, feat_dim, block_num, env_num, syn_type='edge'):
+    if syn_type == 'edge':
+        p_iis = 0.1 - torch.arange(0, 0.1, 0.1 / env_num)
+        p_ijs = 0.01 + torch.arange(0, 0.1, 0.1 / env_num)
+        block_nums = block_num * torch.ones(env_num, dtype=torch.long)
+    elif syn_type == 'block':
+        p_iis = 0.1 * torch.ones(env_num)
+        p_ijs = 0.01 * torch.ones(env_num)
+        block_nums = block_num + torch.arange(0, env_num, 1)
+    elif syn_type == 'both':
+        p_iis = 0.1 - torch.arange(0, 0.1, 0.1 / env_num)
+        p_ijs = 0.01 + torch.arange(0, 0.1, 0.1 / env_num)
+        block_nums = block_num + torch.arange(0, env_num, 1)
+    else:
+        raise NotImplementedError
 
-        idx_shift += x.shape[0]
+    f_x = MLP(1, feat_dim, feat_dim, 2)
+    f_y = DIFFormer(1, feat_dim, 1, 1)
 
-    x = torch.cat(x_list, dim=0)
-    y = torch.cat(y_list, dim=0)
-    edge_index = torch.cat(edge_index_list, dim=1)
-    env = torch.cat(env_list, dim=0)
-    dataset = Data(x=x, edge_index=edge_index, y=y)
-    dataset.env = env
-    dataset.env_num = len(sub_graphs)
-    dataset.train_env_num = train_num
-    print("training sets: ", train_num)
-    # print(len(node_idx_list))
-    ind_idx = torch.cat(node_idx_list[:train_num], dim=0)
-    idx = torch.randperm(ind_idx.size(0))
-    # print(int(idx.size(0)))
-    train_idx_ind = idx[:int(idx.size(0) * train_ratio)]
-    valid_idx_ind = idx[int(idx.size(0) * train_ratio): int(idx.size(0) * (train_ratio + valid_ratio))]
-    test_idx_ind = idx[int(idx.size(0) * (train_ratio + valid_ratio)):]
-    dataset.train_idx = ind_idx[train_idx_ind]
-    dataset.valid_idx = ind_idx[valid_idx_ind]
-    dataset.test_in_idx = ind_idx[test_idx_ind]
+    def gen_edge_index(block_n, p_ii, p_ij):
+        blocks = torch.zeros(num_nodes, dtype=torch.long)
+        cnt, interval = 0., 1.0 / block_n
+        for c in range(block_n):
+            mask = (latents[:, 0] >= cnt) * (latents[:, 0] < (cnt + interval))
+            blocks[mask] = c
+            cnt += interval
 
-    ood_margin = 10
-    dataset.test_ood_idx = []
-    for k in range((len(sub_graphs) - train_num * 2) // ood_margin):
-        ood_idx_k = [node_idx_list[l] for l in
-                     range(train_num * 2 + ood_margin * k, train_num * 2 + ood_margin * (k + 1))]
-        print("k: ", train_num * 2 + ood_margin * k, train_num * 2 + ood_margin * (k + 1))
-        dataset.test_ood_idx.append(torch.cat(ood_idx_k, dim=0))
+        edge_probs = torch.ones((block_n, block_n)) * p_ij
+        edge_probs[torch.arange(block_n), torch.arange(block_n)] = p_ii
+        row, col = torch.combinations(torch.arange(num_nodes), r=2).t()
+        mask = torch.bernoulli(edge_probs[blocks[row], blocks[col]]).to(torch.bool)
+        edge_index = torch.stack([row[mask], col[mask]], dim=0).to(torch.long)
+        return edge_index
 
-    dataset.batch = torch.cat(batch_list, dim=0).long()
+    latents = torch.zeros(num_nodes, 1).uniform_()
+    node_feat = f_x(latents)
+    edge_index = gen_edge_index(block_nums[0], p_iis[0], p_ijs[0])
+    node_label = f_y(latents, edge_index)
 
-    # if method == 'eerm':
-    #     A = to_dense_adj(dataset.edge_index)[0].to(torch.int)[dataset.train_idx][:,dataset.train_idx]
-    #     train_edge_reindex = dense_to_sparse(A)[0]
-    #     #train_edge_index, _ = subgraph(dataset.train_idx, dataset.edge_index)
-    #     dataset.train_edge_reindex = train_edge_reindex
+    d = Data(x=node_feat, edge_index=edge_index, y=node_label)
+    d.env = torch.ones(num_nodes).to(torch.long) * 0
+    d.batch = torch.zeros(num_nodes).to(torch.long)
+    d.y = d.y.reshape(-1, 1)
+    dataset_list = [d]
 
-    if method == 'eerm':
-        dataset.train_idx = dataset.train_idx.sort().values
-        mask = torch.logical_and(torch.isin(dataset.edge_index[0], dataset.train_idx),
-                                 torch.isin(dataset.edge_index[1], dataset.train_idx))
-        selected_edges = dataset.edge_index[:, mask]
-        _, train_edge_reindex0 = torch.unique(
-            torch.tensor(selected_edges, dtype=torch.int), sorted=True, return_inverse=True)
-        dataset.train_edge_reindex = train_edge_reindex0
+    for e in range(1, env_num):
+        edge_index = gen_edge_index(block_nums[e], p_iis[e], p_ijs[e])
+        d = Data(x=node_feat, edge_index=edge_index, y=node_label)
+        d.env = torch.ones(num_nodes).to(torch.long) * e
+        d.batch = torch.zeros(num_nodes).to(torch.long)
+        d.y = d.y.reshape(-1, 1)
+        dataset_list.append(d)
 
-    return dataset
+    return dataset_list
 
-def create_sbm_dataset(data, p_ii=1.5, p_ij=0.5):
-    n = data.num_nodes
+def load_synthetic_dataset(data_dir, num_nodes=2000, feat_dim=10, block_num=5, env_num=10, syn_type='edge'):
+    # data_dir = data_dir + f'synthetic/sbm-edgeprop'
+    # if not os.path.exists(data_dir + '-0.pkl'):
+    #     datasets = create_synthetic_dataset(num_nodes, feat_dim, block_num, env_num)
+    #     for i, d in enumerate(datasets):
+    #         file_path = data_dir + f'-{i}.pkl'
+    #         with open(file_path, 'wb') as f:
+    #             pkl.dump(d, f, pkl.HIGHEST_PROTOCOL)
+    # else:
+    #     print("using existing synthetic data...")
+    #     datasets = []
+    #     for i in range(env_num):
+    #         file_path = data_dir + f'-{i}.pkl'
+    #         with open(file_path, 'rb') as f:
+    #             dataset = pkl.load(f)
+    #         datasets.append(dataset)
+    datasets = create_synthetic_dataset(num_nodes, feat_dim, block_num, env_num, syn_type)
+    dataset_tr, dataset_val = datasets[0], datasets[1]
+    dataset_tr.train_idx = torch.arange(dataset_tr.x.size(0))
+    dataset_tr.train_env_num = 1
+    dataset_val.valid_idx = torch.arange(dataset_val.x.size(0))
 
-    d = data.edge_index.size(1) / data.num_nodes / (data.num_nodes - 1)
-    num_blocks = int(data.y.max()) + 1
-    p_ii, p_ij = p_ii * d, p_ij * d
-    block_size = n // num_blocks
-    block_sizes = [block_size for _ in range(num_blocks-1)] + [block_size + n % block_size]
-    edge_probs = torch.ones((num_blocks, num_blocks)) * p_ij
-    edge_probs[torch.arange(num_blocks), torch.arange(num_blocks)] = p_ii
-    edge_index = stochastic_blockmodel_graph(block_sizes, edge_probs)
-
-    return edge_index
+    dataset_te = datasets[2:]
+    for i, d in enumerate(dataset_te):
+        d.test_idx = torch.arange(d.x.size(0))
+        dataset_te[i] = d
+    return dataset_tr, dataset_val, dataset_te

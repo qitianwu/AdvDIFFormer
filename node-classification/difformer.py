@@ -3,41 +3,8 @@ import torch
 import math
 import numpy as np
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
-from torch_geometric.utils import erdos_renyi_graph, remove_self_loops, add_self_loops, degree, add_remaining_self_loops, negative_sampling
 from torch_geometric.nn import GCNConv
-from data_utils import sys_normalized_adjacency, sparse_mx_to_torch_sparse_tensor
-from torch_sparse import SparseTensor, matmul
 import torch_scatter
-
-def rewiring(edge_index, batch, ratio, edge_attr=None, type='delete'):
-    edge_num, batch_size = edge_index.shape[1], batch.max() + 1
-
-    if type == 'replace':
-        num_nodes = torch_scatter.scatter(torch.ones_like(batch), batch) # [B]
-        shift = torch.cumsum(num_nodes, dim=0) # [B]
-
-        idx = torch.randint(0, edge_num, (int(ratio * edge_num),)) # [e]
-        srx_idx_, end_idx_ = edge_index[:, idx]
-        batchs = batch[end_idx_]  # [e]
-        shifts = shift[batchs] # [e]
-
-        srx_idx_new = torch.randint(0, edge_num, (idx.shape[0], )).to(batch.device) # [e]
-        srx_idx_new = torch.remainder(srx_idx_new, shifts) # [e]
-        edge_index[0, idx] = srx_idx_new
-    else:
-        srx_idx, end_idx = edge_index
-        mask = torch.ones_like(srx_idx).bool()
-        idx = torch.randint(0, edge_num, (int(ratio * edge_num),))  # [e]
-        mask[idx] = False
-        edge_index = torch.stack([srx_idx[mask], end_idx[mask]], dim=0) # [2, E - e]
-        if edge_attr is not None:
-            edge_attr = edge_attr[mask]
-
-    if edge_attr is not None:
-        return edge_index, edge_attr
-    else:
-        return edge_index
 
 def to_block(inputs, n_nodes):
     '''
@@ -209,7 +176,7 @@ class DIFFormer(nn.Module):
     return y_hat predicted logits [N, C]
     '''
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, num_heads=1, kernel='simple',
-                 alpha=0.5, dropout=0.5, use_bn=True, use_residual=True, use_weight=True):
+                 alpha=0.5, dropout=0., use_bn=True, use_residual=True, use_weight=True):
         super(DIFFormer, self).__init__()
 
         self.attn_convs = nn.ModuleList()
@@ -280,43 +247,3 @@ class DIFFormer(nn.Module):
         # output MLP layer
         x_out = self.fcs[-1](x)
         return x_out
-
-    def sup_loss_calc(self, y, pred, criterion, args):
-        if args.dataset in ('twitch', 'elliptic', 'ppi', 'proteins'):
-            if y.shape[1] == 1:
-                true_label = F.one_hot(y, y.max() + 1).squeeze(1)
-            else:
-                true_label = y
-            loss = criterion(pred, true_label.squeeze(1).to(torch.float))
-        else:
-            out = F.log_softmax(pred, dim=1)
-            target = y.squeeze(1)
-            loss = criterion(out, target)
-        return loss
-
-    def print_weight(self):
-        for i, con in enumerate(self.convs):
-            weights = con.weights[:, :64, :].detach().cpu().numpy()
-            np.save(f'weights{i}.npy', weights)
-
-    # rewiring as augmentation
-    def loss_compute(self, d, criterion, args):
-        logits = self.forward(d.x, d.edge_index, d.batch, block_wise=args.use_block)[d.train_idx]
-        y = d.y[d.train_idx]
-        sup_loss = self.sup_loss_calc(y, logits, criterion, args)
-        if args.use_reg:
-            reg_loss_ = []
-            for i in range(args.num_aug_branch):
-                edge_index_i = rewiring(d.edge_index.clone(), d.batch, args.modify_ratio, type=args.rewiring_type)
-
-                logits_i = self.forward(d.x, edge_index_i, d.batch, block_wise=args.use_block)[d.train_idx]
-                reg_loss_i = self.sup_loss_calc(y, logits_i, criterion, args)
-                reg_loss_.append(reg_loss_i)
-                # reg_loss_.append(torch.relu(reg_loss_i - sup_loss) ** 2)
-            # loss_reg = torch.mean(torch.stack(reg_loss_))
-            reg_loss = torch.mean(torch.stack(reg_loss_))
-            print(sup_loss.data, reg_loss.data)
-            loss = sup_loss + args.reg_weight * reg_loss
-        else:
-            loss = sup_loss
-        return loss

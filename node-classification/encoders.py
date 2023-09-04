@@ -12,7 +12,7 @@ class MLP(nn.Module):
     """ adapted from https://github.com/CUAI/CorrectAndSmooth/blob/master/gen_models.py """
 
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers,
-                 dropout=.5):
+                 dropout=0.):
         super(MLP, self).__init__()
         self.lins = nn.ModuleList()
         self.bns = nn.ModuleList()
@@ -61,7 +61,7 @@ class SGC(nn.Module):
 
 class GCN(nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2,
-                 dropout=0.5, save_mem=True, use_bn=True):
+                 dropout=0., save_mem=True, use_bn=True):
         super(GCN, self).__init__()
 
         self.convs = nn.ModuleList()

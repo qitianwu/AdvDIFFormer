@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_sparse import SparseTensor, matmul
 from encoders import *
+from difformer import *
+
 import scipy.sparse
 import numpy as np
 from data_utils import split_into_groups, convert_to_one_hot
@@ -395,6 +397,12 @@ class Baseline(nn.Module):
                                 num_layers=args.num_layers,
                                 dropout=args.dropout,
                                 num_mlp_layers=args.num_mlp_layers)
+        elif args.encoder == 'difformer':
+            self.encoder = DIFFormer(d, args.hidden_channels, args.hidden_channels, num_layers=args.num_layers, alpha=args.alpha,
+                              dropout=args.dropout,
+                              num_heads=args.num_heads, kernel=args.kernel,
+                              use_bn=args.use_bn, use_residual=args.use_residual,
+                              use_weight=args.use_weight).to(device)
         else:
             raise NotImplementedError
         self.predictor = nn.Linear(args.hidden_channels, c)
@@ -610,6 +618,8 @@ class Baseline(nn.Module):
             else:
                 true_label = y
             loss = criterion(pred, true_label.squeeze(1).to(torch.float))
+        elif args.dataset in ('synthetic'):
+            loss = criterion(pred, y)
         else:
             out = F.log_softmax(pred, dim=1)
             target = y.squeeze(1)
