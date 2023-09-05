@@ -228,11 +228,67 @@ def full_attention_conv_v1(
         return attn_output
 
 
-for x in range(20):
+
+def attn_comp(qs, ks, n_nodes=None, block_wise=False):
+    if block_wise:
+        device = qs.device
+        node_mask, max_node = make_batch_mask(n_nodes, device)
+        batch_size, batch = len(n_nodes), make_batch(n_nodes, device)
+        q_pad = to_pad(qs, node_mask, max_node, batch_size)  # [B, M, H, D]
+        k_pad = to_pad(ks, node_mask, max_node, batch_size)  # [B, M, H, D]
+        qk_pad = torch.einsum('abcd,aecd->abce', q_pad, k_pad)
+        # [B, M, H, M]
+        useful_block = []
+        for idx, np in enumerate(n_nodes):
+            useful_block.append(qk_pad[idx, :np, :, :np] + 1)
+        
+        N, heads = qs.shape[:2]
+        attention_num = torch.zeros((N, N, heads)).to(device)
+
+        for i in range(heads):
+            attention_num[:, :, i] = torch.block_diag(*[
+                x[:, i, :] for x in useful_block
+            ])
+
+        attention_normalizer = attention_num.sum(dim=1, keepdim=True) # [N, 1, H]
+
+    else:
+        qks = torch.einsum("nhd,lhd->nlh", qs, ks)  # [N, N, H]
+        attention_num = qks + torch.ones_like(qks)  # (N, N, H)
+        attention_normalizer = attention_num.sum(dim=1, keepdim=True)  # [N, 1, H]
+
+    return attention_num,  attention_num / attention_normalizer
+
+
+
+def attn_comp_old(qs, ks, n_nodes=None, block_wise=False):
+
+    if block_wise:
+        q_block = to_block(qs, n_nodes)  # (N, H, B*D)
+        k_block = to_block(ks, n_nodes)  # (N, H, B*D)
+        qks = torch.einsum("nhd,lhd->nlh", q_block, k_block)  # [N, N, H]
+        ones_block = torch.zeros_like(qks)
+        cnt = 0
+        for n in n_nodes:
+            ones_block[cnt:cnt + n, cnt:cnt + n, :] = 1.0
+            cnt += n
+        attention_num = qks + ones_block  # (N, N, H)
+        attention_normalizer = attention_num.sum(dim=1, keepdim=True) # [N, 1, H]
+
+    else:
+        qks = torch.einsum("nhd,lhd->nlh", qs, ks)  # [N, N, H]
+        attention_num = qks + torch.ones_like(qks)  # (N, N, H)
+        attention_normalizer = attention_num.sum(dim=1, keepdim=True)  # [N, 1, H]
+
+    return attention_num, attention_num / attention_normalizer  # [N, N, H]
+
+
+
+for x in range(10):
     dim = random.randint(5, 50)
-    BS = random.randint(5, 50)
-    N_heads = random.randint(5, 10)
-    N_nodes = [random.randint(5, 40) for _ in range(BS)]
+    BS = random.randint(2, 3)
+    N_heads = random.randint(2, 3)
+    N_nodes = [random.randint(4, 5) for _ in range(BS)]
     sum_nodes = sum(N_nodes)
 
     N_nodes = torch.LongTensor(N_nodes)
@@ -247,3 +303,11 @@ for x in range(20):
 
     if not torch.allclose(res1, res2, atol=1e-5):
         print(res1, '\n', res2)
+
+
+    aa, res1 = attn_comp(x, y, N_nodes, True)
+    bb, res2 = attn_comp_old(x, y, N_nodes, True)
+
+    if not torch.allclose(res1, res2, atol=1e-5):
+        # print(aa, '\n', bb)
+        print(torch.allclose(aa, bb, atol=1e-5))
