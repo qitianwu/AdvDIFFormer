@@ -12,11 +12,13 @@ from torch_geometric.data import ShaDowKHopSampler
 from logger import Logger, save_result
 from data_utils import print_dataset_info
 from dataset import *
-from eval import evaluate_multi_graph, evaluate_single_graph, eval_acc, eval_rocauc, eval_f1
-from parse import parse_method, parser_add_main_args
+from eval import *
+from parse import *
 from model import *
 from ours import *
 from ours2 import *
+from ours3 import *
+
 
 # NOTE: for consistent data splits, see data_utils.rand_train_test_idx
 def fix_seed(seed):
@@ -42,38 +44,31 @@ else:
 ### Load and preprocess data ###
 # multi-graph datasets, divide graphs into train/valid/test
 if args.dataset == 'twitch':
-    dataset = load_twitch_dataset(args.data_dir, args.method, train_num=3)
-elif args.dataset == 'elliptic':
-    dataset = load_elliptic_dataset(args.data_dir, args.method, train_num=5)
+    dataset, dataset_val, dataset_te = load_twitch_dataset(args.data_dir, args.method)
 # single-graph datasets, divide nodes into train/valid/test
 elif args.dataset == 'arxiv':
-    dataset, dataset_val, dataset_te = load_arxiv_dataset(args.data_dir, args.method, train_num=3)
+    dataset, dataset_val, dataset_te = load_arxiv_dataset(args.data_dir, args.method)
 # synthetic datasets, add spurious node features
-elif args.dataset in ('cora', 'citeseer', 'pubmed', 'photo', 'computer'):
-    dataset = load_synthetic_dataset(args.data_dir, args.dataset, args.method, train_num=1)
+elif args.dataset in ('synthetic'):
+    dataset, dataset_val, dataset_te = load_synthetic_dataset(args.data_dir, syn_type=args.syn_type)
 else:
     raise ValueError('Invalid dataname')
 
-if len(dataset.y.shape) == 1:
-    dataset.y = dataset.y.unsqueeze(1)
-class_num = max(dataset.y.max().item() + 1, dataset.y.shape[1])
+if args.dataset in ('synthetic'):
+    class_num = 1
+else:
+    class_num = max(dataset.y.max().item() + 1, dataset.y.shape[1])
 feat_num = dataset.x.shape[1]
 
-if args.dataset == 'twitch':
-    print_dataset_info(dataset, args.dataset)
-    dataset.x, dataset.y, dataset.edge_index, dataset.env, dataset.batch = \
-        dataset.x.to(device), dataset.y.to(device), dataset.edge_index.to(device), dataset.env.to(
-            device), dataset.batch.to(device)
-elif args.dataset == 'arxiv':
-    print_dataset_info(dataset, args.dataset, dataset_val, dataset_te)
-    dataset.x, dataset.y, dataset.edge_index, dataset.env, dataset.batch = \
-        dataset.x.to(device), dataset.y.to(device), dataset.edge_index.to(device), dataset.env.to(
-            device), dataset.batch.to(device)
-    dataset_val.x, dataset_val.y, dataset_val.edge_index, dataset_val.batch = \
-        dataset_val.x.to(device), dataset_val.y.to(device), dataset_val.edge_index.to(device), dataset_val.batch.to(device)
-    for d in dataset_te:
-        d.x, d.y, d.edge_index, d.batch = \
-        d.x.to(device), d.y.to(device), d.edge_index.to(device), d.batch.to(device)
+print_dataset_info(dataset, args.dataset, dataset_val, dataset_te)
+dataset.x, dataset.y, dataset.edge_index, dataset.env, dataset.batch = \
+    dataset.x.to(device), dataset.y.to(device), dataset.edge_index.to(device), dataset.env.to(
+        device), dataset.batch.to(device)
+dataset_val.x, dataset_val.y, dataset_val.edge_index, dataset_val.batch = \
+    dataset_val.x.to(device), dataset_val.y.to(device), dataset_val.edge_index.to(device), dataset_val.batch.to(device)
+for d in dataset_te:
+    d.x, d.y, d.edge_index, d.batch = \
+    d.x.to(device), d.y.to(device), d.edge_index.to(device), d.batch.to(device)
 
 ### Load method ###
 is_multilabel = args.dataset in ('proteins', 'ppi')
@@ -82,7 +77,7 @@ if args.method in ('erm', 'reg', 'dropedge', 'irm', 'mixup', 'groupdro', 'coral'
     model = Baseline(feat_num, class_num, dataset, args, device, dataset.train_env_num, is_multilabel).to(device)
     if args.method == 'srgnn':
         model.srgnn_preprocess(dataset, num = min(dataset.train_idx.shape[0], 5000),beta=args.kmm_beta)
-elif args.method == 'ours':
+elif args.method == 'difformer':
     model = DIFFormer(feat_num, args.hidden_channels, class_num, num_layers=args.num_layers, alpha=args.alpha, dropout=args.dropout,
                       num_heads=args.num_heads, kernel=args.kernel,
                       use_bn=args.use_bn, use_residual=args.use_residual,
@@ -91,28 +86,33 @@ elif args.method == 'ours2':
     model = Ours(feat_num, args.hidden_channels, class_num, num_layers=args.num_layers, alpha=args.alpha, dropout=args.dropout,
                       num_heads=args.num_heads, kernel=args.kernel, K_order=args.K_order,
                       use_bn=args.use_bn, use_residual=args.use_residual).to(device)
+elif args.method == 'ours3':
+    model = PCFormer(feat_num, args.hidden_channels, class_num, beta=args.beta, theta=args.theta,
+                 dropout=args.dropout, num_layers=args.num_layers, num_heads=args.num_heads, solver=args.solver, K_order=args.K_order,
+                 use_bn=args.use_bn, use_residual=args.use_residual).to(device)
 
 if args.method != 'mixup':
     if args.dataset in ('proteins', 'ppi', 'elliptic', 'twitch'):
         criterion = nn.BCEWithLogitsLoss(reduction='none' if args.method in ['irm', 'groupdro'] else 'mean')
+    elif args.dataset in ('synthetic'):
+        criterion = nn.MSELoss(reduction='mean')
     else:
         criterion = nn.CrossEntropyLoss(reduction='none' if args.method in ['irm', 'groupdro'] else 'mean')
 else:
     criterion = LabelSmoothLoss(args.label_smooth_val, mode='multilabel' if is_multilabel else 'classy_vision')
 
-if args.dataset in ('proteins', 'ppi', 'twitch'):
+if args.dataset in ('twitch'):
     eval_func = eval_rocauc
-elif args.dataset in ('elliptic'):
-    eval_func = eval_f1
+    logger = Logger(args.runs, max_as_opt=True)
+elif args.dataset in ('synthetic'):
+    eval_func = eval_mae
+    logger = Logger(args.runs, max_as_opt=False)
 else:
     eval_func = eval_acc
-
-logger = Logger(args.runs, args)
+    logger = Logger(args.runs, max_as_opt=True)
 
 model.train()
 print('MODEL:', model)
-
-tr_acc, val_acc = [], []
 
 ### Training loop ###
 for run in range(args.runs):
@@ -150,14 +150,8 @@ for run in range(args.runs):
             loss = model.loss_compute(dataset, criterion, args)
             loss.backward()
             optimizer.step()
-        if args.dataset == 'arxiv':
-            result = evaluate_single_graph(model, dataset, dataset_val, dataset_te, eval_func, args)
-        elif args.dataset == 'twitch':
-            result = evaluate_multi_graph(model, dataset, eval_func, args)
+        result = evaluate_single_graph(model, dataset, dataset_val, dataset_te, eval_func, args)
         logger.add_result(run, result)
-
-        tr_acc.append(result[0])
-        val_acc.append(result[2])
 
         if epoch % args.display_step == 0:
             m = f'Epoch: {epoch:02d}, Loss: {loss:.4f}, Train: {100 * result[0]:.2f}%, Valid: {100 * result[1]:.2f}% '

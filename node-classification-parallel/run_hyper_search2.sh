@@ -1,25 +1,72 @@
 datasets=('arxiv' 'twitch')
 dev=0
 
-for a in 1e5 1e4 1e3 1e2 1e1
+#for a in 0.1 0.3 0.5 0.7
+#do
+#  for b in 1
+#    do
+#    for c in 1 2 4 8 16
+#    do
+#      for d in 1e4
+#      do
+#        for e in 0.2
+#        do
+#          python main.py --dataset twitch --method ours3 --lr 1e-4 --weight_decay 0. --num_layers 1 --beta $a \
+#--hidden_channels 64 --num_heads $b --K_order $c --kernel simple --use_residual --use_block \
+#--use_reg --reg_weight $d --num_aug_branch 5 --modify_ratio $e --rewiring_type replace \
+#--runs 1 --epochs 500 --seed 123 --device 2 --save_result
+#        done
+#      done
+#    done
+#  done
+#done
+
+for a in 0.5
 do
-  for c in 0.3 0.2 0.1
+  for b in 1 2 4
     do
-    for b in 1 2 3
+    for c in 1
     do
-      for e in 1 2 3
+      for d in 0.1 0.5 1.0 5.0 1e1
       do
-        for f in 1 2 3
+        for e in 0.1 0.2 0.3 0.4 0.5
         do
-          python main.py --dataset twitch --method ours2 --lr 1e-4 --weight_decay 0. --num_layers $e --K_order $f \
---hidden_channels 64 --num_heads $b --kernel simple --use_residual --use_block \
---use_reg --reg_weight $a --num_aug_branch 5 --modify_ratio $c --rewiring_type replace \
---runs 5 --epochs 500 --seed 123 --device $dev --save_result
+          for f in 'replace' 'delete'
+          do
+          python main.py --dataset twitch --method ours3 --lr 1e-4 --weight_decay 0. --num_layers 1 --beta $a \
+--hidden_channels 64 --num_heads $b --K_order $c --kernel simple --use_residual --use_block \
+--use_reg --reg_weight $d --num_aug_branch 5 --modify_ratio $e --rewiring_type $f \
+--runs 1 --epochs 500 --seed 123 --device 2 --save_result
+          done
         done
       done
     done
   done
 done
+
+
+#for a in 1e4
+#do
+#  for c in 0.2
+#    do
+#    for b in 1 2 3
+#    do
+#      for e in 1 2 4
+#      do
+#        for f in 1 2 3
+#        do
+#          for g in 32 64 128
+#          do
+#          python main.py --dataset twitch --method ours2 --lr 1e-4 --weight_decay 0. --num_layers $b --K_order $f \
+#--hidden_channels $g --num_heads $e --kernel simple --use_residual --use_block \
+#--use_reg --reg_weight $a --num_aug_branch 5 --modify_ratio $c --rewiring_type replace \
+#--runs 1 --epochs 1500 --seed 123 --device $dev --save_result
+#          done
+#        done
+#      done
+#    done
+#  done
+#done
 #
 #for a in 1e5 1e4 1e3
 #do
