@@ -39,35 +39,38 @@ def rewiring(edge_index, batch, ratio, edge_attr=None, type='delete'):
     else:
         return edge_index
 
-def attn_conv(qs, ks, vs, return_attn=False):
+def attn_conv(qs, ks, vs):
     '''
     qs: [B, N, H, D]
     ks: [B, N, H, D]
     vs: [B, N, H, D]
-    return attn: return propagation results (False) or attention matrix (True)
     '''
     N = qs.shape[0]
 
-    if return_attn:
-        qks = torch.einsum("bnhd,blhd->bnlh", qs, ks)  # [B, N, N, H]
-        attn_num = qks + torch.ones_like(qks)  # (B, N, N, H)
-        attn_den = attn_num.sum(dim=2, keepdim=True)  # [B, N, 1, H]
+    # numerator
+    kvs = torch.einsum("blhm,blhd->bhmd", ks, vs) # [B, H, D, D]
+    qkvs = torch.einsum("bnhm,bhmd->bnhd", qs, kvs)  # [B, N, H, D]
+    all_ones = torch.ones([vs.shape[1]]).to(vs.device) # [N]
+    vs_sum = torch.einsum("l,blhd->bhd", all_ones, vs)  # [B, H, D]
+    attn_conv_num = qkvs + vs_sum.unsqueeze(1).repeat(1, vs.shape[1], 1, 1)  # [B, N, H, D]
 
-        return attn_num / attn_den  # [B, N, N, H]
-    else:
-        # numerator
-        kvs = torch.einsum("blhm,blhd->bhmd", ks, vs) # [B, H, D, D]
-        qkvs = torch.einsum("bnhm,bhmd->bnhd", qs, kvs)  # [B, N, H, D]
-        all_ones = torch.ones([vs.shape[1]]).to(vs.device) # [N]
-        vs_sum = torch.einsum("l,blhd->bhd", all_ones, vs)  # [B, H, D]
-        attn_conv_num = qkvs + vs_sum.unsqueeze(1).repeat(1, vs.shape[1], 1, 1)  # [B, N, H, D]
+    # denominator
+    ks_sum = torch.einsum("blhm,l->bhm", ks, all_ones) # [B, H, D]
+    attn_conv_den = torch.einsum("bnhm,bhm->bnh", qs, ks_sum).unsqueeze(-1)  # [B, N, H, 1]
+    attn_conv_den += torch.ones_like(attn_conv_den) * N
 
-        # denominator
-        ks_sum = torch.einsum("blhm,l->bhm", ks, all_ones) # [B, H, D]
-        attn_conv_den = torch.einsum("bnhm,bhm->bnh", qs, ks_sum).unsqueeze(-1)  # [B, N, H, 1]
-        attn_conv_den += torch.ones_like(attn_conv_den) * N
+    return attn_conv_num / attn_conv_den  # [B, N, H, D]
 
-        return attn_conv_num / attn_conv_den  # [B, N, H, D]
+def attn_comp(qs, ks):
+    '''
+    qs: [B, N, H, D]
+    ks: [B, N, H, D]
+    '''
+    qks = torch.einsum("bnhd,blhd->bnlh", qs, ks)  # [B, N, N, H]
+    attn_num = qks + torch.ones_like(qks)  # (B, N, N, H)
+    attn_den = attn_num.sum(dim=2, keepdim=True)  # [B, N, 1, H]
+
+    return attn_num / attn_den  # [B, N, N, H]
 
 def gcn_conv(xs, adj_t):
     '''
