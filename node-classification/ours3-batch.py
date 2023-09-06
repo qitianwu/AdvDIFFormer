@@ -136,13 +136,12 @@ class GloAttnConv(nn.Module):
         ks = key / torch.norm(key, p=2, dim=2, keepdim=True)  # (N_total, H, D)
 
         adj_t = norm_adj(x.shape[0], edge_index, edge_weight)  # [N_total, N_total] sparse matrix
-        qs_batch = block_to_batch(qs, batch) # [B, N, H, D], N for max_num_nodes
-        ks_batch = block_to_batch(ks, batch) # [B, N, H, D]
-        x_batch = block_to_batch(x, batch) # [B, N, D]
+        xs = x.unsqueeze(1).repeat(1, self.num_heads, 1)  # [N_total, H, D]
+        qs_batch = block_to_batch(qs, batch)  # [B, N, H, D], N for max_num_nodes
+        ks_batch = block_to_batch(ks, batch)  # [B, N, H, D]
 
         if self.solver == 'series':
-            xs = x.unsqueeze(1).repeat(1, self.num_heads, 1)  # [N_total, H, D]
-            xs_batch = x_batch.unsqueeze(2).repeat(1, 1, self.num_heads, 1) # [B, N, H, D]
+            xs_batch = block_to_batch(xs, batch)  # [B, N, H, D]
             for i in range(self.K_order):
                 gcn_i = gcn_conv(xs, adj_t) # [N_total, H, D]
                 attn_i = attn_conv(qs_batch, ks_batch, xs_batch)
@@ -150,16 +149,17 @@ class GloAttnConv(nn.Module):
                 xs += self.beta * gcn_i + (1 - self.beta) * attn_i # [N_total, H, D]
             x = xs.reshape(-1, self.num_heads * self.in_channels) # [N_total, H*D]
         elif self.solver == 'inverse':
-            S = attn_conv(qs_batch, ks_batch, xs_batch, return_attn=True) # [B, N, N, H]
-            x_ = []
+            S = attn_comp(qs_batch, ks_batch) # [B, N, N, H]
             A_batch = block_to_batch(adj_t.to_dense(), batch)  # [B, N, N]
+            x_batch = block_to_batch(x, batch)  # [B, N, D]
+            x_ = []
             for h in range(self.num_heads):
-                A_h = (1 - self.beta) * S[:, :, :, h] + self.beta * A_batch # [B, N, N]
+                A_h = (1 - self.beta) * S[:, :, :, h] + self.beta * A_batch  # [B, N, N]
                 L_h = (1 + self.theta) * torch.eye(xs_batch.shape[1]).unsqueeze(0).to(A_h.device) - A_h # [B, N, N]
-                x_h = torch.linalg.solve(L_h, x_batch) # [B, N, D]
+                x_h = torch.linalg.solve(L_h, x_batch)  # [B, N, D]
                 x_h = batch_to_block(x_h, batch) # [N_total, D]
                 x_ += [x_h]
-            x = torch.cat(x_, dim=1) # [N_total, H*D]
+            x = torch.cat(x_, dim=1)  # [N_total, H*D]
         else:
             raise NotImplementedError
 
