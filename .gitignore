@@ -17,6 +17,10 @@ __pycache__/
 **/dataset
 **/preprocess
 *.pkl
+**/results/
+**/saved_result/
+**/config/
+
 
 # SLURM script
 *.slurm

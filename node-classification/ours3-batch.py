@@ -39,170 +39,74 @@ def rewiring(edge_index, batch, ratio, edge_attr=None, type='delete'):
     else:
         return edge_index
 
-def to_block(inputs, n_nodes):
+def attn_conv(qs, ks, vs, return_attn=False):
     '''
-    input: (N, H, n_col), n_nodes: (B)
+    qs: [B, N, H, D]
+    ks: [B, N, H, D]
+    vs: [B, N, H, D]
+    return attn: return propagation results (False) or attention matrix (True)
     '''
-    blocks = []
-    for h in range(inputs.size(1)):
-        feat_list = []
-        cnt = 0
-        for n in n_nodes:
-            feat_list.append(inputs[cnt : cnt + n, h])
-            cnt += n
-        blocks_h = torch.block_diag(*feat_list) # (N, n_col*B)
-        blocks.append(blocks_h)
-    blocks = torch.stack(blocks, dim=1) # (N, H, n_col*B)
-    return blocks
+    N = qs.shape[0]
 
-def unpack_block(inputs, n_col, n_nodes):
-    '''
-    input: (N, H, B*n_col), n_col: int, n_nodes: (B)
-    '''
-    unblocks = []
-    for h in range(inputs.size(1)):
-        feat_list = []
-        cnt = 0
-        start_col = 0
-        for n in n_nodes:
-            feat_list.append(inputs[cnt:cnt + n, h, start_col:start_col + n_col])
-            cnt += n
-            start_col += n_col
-        unblocks_h = torch.cat(feat_list, dim=0) # (N, n_col)
-        unblocks.append(unblocks_h)
-    unblocks = torch.stack(unblocks, dim=1) # (N, H, n_col)
-    return unblocks
+    if return_attn:
+        qks = torch.einsum("bnhd,blhd->bnlh", qs, ks)  # [B, N, N, H]
+        attn_num = qks + torch.ones_like(qks)  # (B, N, N, H)
+        attn_den = attn_num.sum(dim=2, keepdim=True)  # [B, N, 1, H]
 
-def batch_repeat(inputs, n_col, n_nodes):
-    '''
-    input: (H, B*n_col), n_col: int, n_nodes: (B)
-    '''
-    x_list = []
-    cnt = 0
-    for n in n_nodes:
-        x = inputs[:, cnt:cnt + n_col].repeat(n, 1, 1)  # (n, H, n_col)
-        x_list.append(x)
-        cnt += n_col
-    return torch.cat(x_list, dim=0) # [N, H, n_col]
-
-
-def gcn_conv(x, edge_index, edge_weight=None):
-    N, H = x.shape[0], x.shape[1]
-    row, col = edge_index
-    if edge_weight is None:
-        value = torch.ones(edge_index.shape[1], dtype=torch.float).to(x.device)
+        return attn_num / attn_den  # [B, N, N, H]
     else:
-        value = edge_weight
-    adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(N, N))
+        # numerator
+        kvs = torch.einsum("blhm,blhd->bhmd", ks, vs) # [B, H, D, D]
+        qkvs = torch.einsum("bnhm,bhmd->bnhd", qs, kvs)  # [B, N, H, D]
+        all_ones = torch.ones([vs.shape[1]]).to(vs.device) # [N]
+        vs_sum = torch.einsum("l,blhd->bhd", all_ones, vs)  # [B, H, D]
+        attn_conv_num = qkvs + vs_sum.unsqueeze(1).repeat(1, vs.shape[1], 1, 1)  # [B, N, H, D]
 
-    deg = adj_t.sum(dim=1).to(torch.float)
-    deg_inv_sqrt = deg.pow(-0.5)
-    deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-    adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
+        # denominator
+        ks_sum = torch.einsum("blhm,l->bhm", ks, all_ones) # [B, H, D]
+        attn_conv_den = torch.einsum("bnhm,bhm->bnh", qs, ks_sum).unsqueeze(-1)  # [B, N, H, 1]
+        attn_conv_den += torch.ones_like(attn_conv_den) * N
 
+        return attn_conv_num / attn_conv_den  # [B, N, H, D]
+
+def gcn_conv(xs, adj_t):
+    '''
+    xs: [N_total, H, D]
+    '''
     x_ = []
-    for h in range(H):
-        x_h = x[:, h] # [N, D]
+    for h in range(xs.shape[1]):
+        x_h = xs[:, h] # [N, D]
         x_.append(adj_t @ x_h)
     return torch.stack(x_, dim=1) # [N, H, D]
 
-def fast_attn_conv(qs, ks, vs, n_nodes=None, block_wise=False):
-    N = qs.shape[0]
-
-    if block_wise:
-        # numerator
-        q_block = to_block(qs, n_nodes)  # (N, H, B*D)
-        k_block = to_block(ks, n_nodes)  # (N, H, B*D)
-        v_block = to_block(vs, n_nodes)  # (N, H, B*D)
-        kvs = torch.einsum("lhm,lhd->hmd", k_block, v_block)  # [H, B*D, B*D]
-        attention_num = torch.einsum("nhm,hmd->nhd", q_block, kvs)  # (N, H, B*D)
-        attention_num = unpack_block(attention_num, qs.shape[2], n_nodes)  # (N, H, D)
-
-        vs_sum = v_block.sum(dim=0)  # (H, B*D)
-        vs_sum = batch_repeat(vs_sum, vs.shape[2], n_nodes)  # (N, H, D)
-        attention_num += vs_sum  # (N, H, D)
-
-        # denominator
-        all_ones = torch.ones([ks.shape[0], qs.shape[1]]).to(ks.device).unsqueeze(2)  # [N, H, 1]
-        one_block = to_block(all_ones, n_nodes)  # [N, H, B]
-        ks_sum = torch.einsum("lhm,lhb->hmb", k_block, one_block)  # [H, B*D, B]
-        attention_normalizer = torch.einsum("nhm,hmb->nhb", q_block, ks_sum)  # [N, H, B]
-
-        attention_normalizer = unpack_block(attention_normalizer, 1, n_nodes)  # (N, H, 1)
-        attention_normalizer += batch_repeat(n_nodes.repeat(qs.shape[1], 1), 1, n_nodes)  # (N, H, 1)
-
-    else:
-        # numerator
-        kvs = torch.einsum("lhm,lhd->hmd", ks, vs)
-        attention_num = torch.einsum("nhm,hmd->nhd", qs, kvs)  # [N, H, D]
-        all_ones = torch.ones([vs.shape[0]]).to(vs.device)
-        vs_sum = torch.einsum("l,lhd->hd", all_ones, vs)  # [H, D]
-        attention_num += vs_sum.unsqueeze(0).repeat(vs.shape[0], 1, 1)  # [N, H, D]
-
-        # denominator
-        all_ones = torch.ones([ks.shape[0]]).to(ks.device)  # [N]
-        ks_sum = torch.einsum("lhm,l->hm", ks, all_ones)
-        attention_normalizer = torch.einsum("nhm,hm->nh", qs, ks_sum)  # [N, H]
-
-        # attentive aggregated results
-        attention_normalizer = torch.unsqueeze(attention_normalizer, len(attention_normalizer.shape))  # [N, H, 1]
-        attention_normalizer += torch.ones_like(attention_normalizer) * N
-
-    return attention_num / attention_normalizer  # [N, H, D]
-
-def norm_adj_comp(x, edge_index, edge_weight=None):
-    N, H = x.shape[0], x.shape[1]
+def norm_adj(num_nodes, edge_index, edge_weight=None):
+    '''
+    compute A_tilde for a batch of graphs stored as a diagonal-block A [N_total, N_total]
+    '''
     row, col = edge_index
     if edge_weight is None:
         value = torch.ones(edge_index.shape[1], dtype=torch.float).to(x.device)
     else:
         value = edge_weight
-    adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(N, N))
+    adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(num_nodes, num_nodes))
 
     deg = adj_t.sum(dim=1).to(torch.float)
     deg_inv_sqrt = deg.pow(-0.5)
     deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
     adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
-    return adj_t.to_dense()
-
-def attn_comp(qs, ks, n_nodes=None, block_wise=False):
-
-    if block_wise:
-        q_block = to_block(qs, n_nodes)  # (N, H, B*D)
-        k_block = to_block(ks, n_nodes)  # (N, H, B*D)
-        qks = torch.einsum("nhd,lhd->nlh", q_block, k_block)  # [N, N, H]
-        ones_block = torch.zeros_like(qks)
-        cnt = 0
-        for n in n_nodes:
-            ones_block[cnt:cnt + n, cnt:cnt + n, :] = 1.0
-            cnt += n
-        attention_num = qks + ones_block  # (N, N, H)
-        attention_normalizer = attention_num.sum(dim=1, keepdim=True) # [N, 1, H]
-
-    else:
-        qks = torch.einsum("nhd,lhd->nlh", qs, ks)  # [N, N, H]
-        attention_num = qks + torch.ones_like(qks)  # (N, N, H)
-        attention_normalizer = attention_num.sum(dim=1, keepdim=True)  # [N, 1, H]
-
-    return attention_num / attention_normalizer  # [N, N, H]
+    return adj_t
 
 class GloAttnConv(nn.Module):
     '''
     one global attention layer
+    implement a solver for approximating the closed-form solution of diffusion PDE
+    when solver is series: use series expansion for approximation
+    when solver is inverse: use Chebyshev technique for approximation
     '''
-    def __init__(self, in_channels,
-               out_channels,
-               K_order=4,
-               num_heads=1,
-               beta=0.5,
-               theta=0.,
-               solver='series'):
+    def __init__(self, in_channels, out_channels, num_heads=1, beta=0.5, solver='series', K_order=4, theta=0.):
         super(GloAttnConv, self).__init__()
         self.Wk = nn.Linear(in_channels, in_channels * num_heads)
         self.Wq = nn.Linear(in_channels, in_channels * num_heads)
-        # self.Wo = nn.ModuleList()
-        # for h in range(num_heads):
-        #     self.Wo.append(nn.Linear(in_channels, out_channels))
         self.Wo = nn.Linear(in_channels * num_heads, out_channels)
 
         self.out_channels = out_channels
@@ -217,39 +121,49 @@ class GloAttnConv(nn.Module):
         self.Wk.reset_parameters()
         self.Wq.reset_parameters()
         self.Wo.reset_parameters()
-        # for fc in self.Wo:
-        #     fc.reset_parameters()
 
-    def forward(self, x, edge_index, edge_weight=None, n_nodes=None, block_wise=False):
+    def forward(self, x, edge_index, edge_weight=None, batch=None):
+        '''
+        input a batch of graphs stored as a diagonal-block form
+        x: [N_total, D]
+        edge_index: [2, E_total]
+        edge_weight: [2, E_total]
+        batch: [N_total] indicates each node belonging to the graph id in the batch
+        '''
         query = self.Wq(x).reshape(-1, self.num_heads, self.in_channels)
         key = self.Wk(x).reshape(-1, self.num_heads, self.in_channels)
-        qs = query / torch.norm(query, p=2, dim=2, keepdim=True)  # (N, H, D)
-        ks = key / torch.norm(key, p=2, dim=2, keepdim=True)  # (N, H, D)
+        qs = query / torch.norm(query, p=2, dim=2, keepdim=True)  # (N_total, H, D)
+        ks = key / torch.norm(key, p=2, dim=2, keepdim=True)  # (N_total, H, D)
+
+        adj_t = norm_adj(x.shape[0], edge_index, edge_weight)  # [N_total, N_total] sparse matrix
+        qs_batch = block_to_batch(qs, batch) # [B, N, H, D], N for max_num_nodes
+        ks_batch = block_to_batch(ks, batch) # [B, N, H, D]
+        x_batch = block_to_batch(x, batch) # [B, N, D]
 
         if self.solver == 'series':
-            x = x.unsqueeze(1).repeat(1, self.num_heads, 1)  # [N, H, D]
-            x_ = [x]
+            xs = x.unsqueeze(1).repeat(1, self.num_heads, 1)  # [N_total, H, D]
+            xs_batch = x_batch.unsqueeze(2).repeat(1, 1, self.num_heads, 1) # [B, N, H, D]
             for i in range(self.K_order):
-                gcn_i = gcn_conv(x_[-1], edge_index, edge_weight)
-                attn_i = fast_attn_conv(qs, ks, x_[-1], n_nodes, block_wise)
-                x_i = self.beta * gcn_i + (1 - self.beta) * attn_i
-                x_.append(x_i)
-            x = torch.stack(x_, dim=-1).sum(-1) # [N, H, D, K+1] -> [N, H, D]
-            x = x.reshape(-1, self.num_heads * self.in_channels) # [N, H*D]
+                gcn_i = gcn_conv(xs, adj_t) # [N_total, H, D]
+                attn_i = attn_conv(qs_batch, ks_batch, xs_batch)
+                attn_i = batch_to_block(attn_i, batch) # [N_total, H, D]
+                xs += self.beta * gcn_i + (1 - self.beta) * attn_i # [N_total, H, D]
+            x = xs.reshape(-1, self.num_heads * self.in_channels) # [N_total, H*D]
         elif self.solver == 'inverse':
-            S = attn_comp(qs, ks, n_nodes, block_wise) # [N, N, H]
-            A_tilde = norm_adj_comp(x, edge_index, edge_weight) # [N, N]
+            S = attn_conv(qs_batch, ks_batch, xs_batch, return_attn=True) # [B, N, N, H]
             x_ = []
+            A_batch = block_to_batch(adj_t.to_dense(), batch)  # [B, N, N]
             for h in range(self.num_heads):
-                A_h = (1 - self.beta) * S[:, :, h] + self.beta * A_tilde # [N, N]
-                L_h = (1 + self.theta) * torch.eye(x.shape[0]).to(A_h.device) - A_h
-                x_h = torch.linalg.solve(L_h, x) # [N, D]
+                A_h = (1 - self.beta) * S[:, :, :, h] + self.beta * A_batch # [B, N, N]
+                L_h = (1 + self.theta) * torch.eye(xs_batch.shape[1]).unsqueeze(0).to(A_h.device) - A_h # [B, N, N]
+                x_h = torch.linalg.solve(L_h, x_batch) # [B, N, D]
+                x_h = batch_to_block(x_h, batch) # [N_total, D]
                 x_ += [x_h]
-            x = torch.cat(x_, dim=1) # [N, H*D]
+            x = torch.cat(x_, dim=1) # [N_total, H*D]
         else:
             raise NotImplementedError
 
-        x_out = self.Wo(x) / self.num_heads # [N, D]
+        x_out = self.Wo(x) / self.num_heads # [N_total, D]
 
         return x_out
 
@@ -337,11 +251,6 @@ class PCFormer(nn.Module):
             target = y.squeeze(1)
             loss = criterion(out, target)
         return loss
-
-    def print_weight(self):
-        for i, con in enumerate(self.convs):
-            weights = con.weights[:, :64, :].detach().cpu().numpy()
-            np.save(f'weights{i}.npy', weights)
 
     # rewiring as augmentation
     def loss_compute(self, d, criterion, args):
