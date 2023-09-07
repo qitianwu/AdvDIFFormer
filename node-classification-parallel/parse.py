@@ -164,7 +164,7 @@ def parser_add_main_args(parser):
 
     # training
     parser.add_argument('--batch_size', type=int, default=2048)
-    parser.add_argument('--weight_decay', type=float, default=5e-4)
+    parser.add_argument('--weight_decay', type=float, default=0.)
     parser.add_argument('--dropout', type=float, default=0.0)
     parser.add_argument('--lr', type=float, default=0.01)
 

@@ -99,8 +99,10 @@ def save_result(args, results):
     with open(f"{filename}", 'a+') as write_obj:
         write_obj.write(
             f"{args.method} " + f"{args.encoder}: " + f"{args.lr}: " + f"{args.hidden_channels}: " + f"{args.num_layers} " + \
-            f"{args.beta} " + f"{args.num_heads} " + f"{args.solver} " + f"{args.theta} " + f"{args.K_order} " + \
-            f"{args.use_reg} " + f"{args.reg_weight} " + f"{args.num_aug_branch}: " + f"{args.modify_ratio} " + f"{args.rewiring_type} " + "\n")
+            f"{args.beta} " + f"{args.num_heads} " + f"{args.solver} " + f"{args.theta} " + f"{args.K_order} " + "\n")
+        m = ""
         for i in range(results.size(1)):
             r = results[:, i]
-            write_obj.write(f"{r.mean():.2f} $\pm$ {r.std():.2f} \n")
+            m += f"{r.mean():.2f} $\pm$ {r.std():.2f} "
+        m += "\n"
+        write_obj.write(m)

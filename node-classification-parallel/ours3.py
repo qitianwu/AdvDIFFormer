@@ -122,28 +122,31 @@ def fast_attn_conv(qs, ks, vs):
     return output [N, H, D]
     '''
 
-    N = qs.shape[0]
-
     # numerator
-    kvs = torch.einsum("lhm,lhd->hmd", ks, vs)
-    attention_num = torch.einsum("nhm,hmd->nhd", qs, kvs)  # [N, H, D]
-    all_ones = torch.ones([vs.shape[0]]).to(vs.device)
-    vs_sum = torch.einsum("l,lhd->hd", all_ones, vs)  # [H, D]
-    # [N, H, D]
-    attention_num += vs_sum.unsqueeze(0).repeat(vs.shape[0], 1, 1)
+    device = qs.device
+    node_mask, max_node = make_batch_mask(n_nodes, device)
+    batch_size, batch = len(n_nodes), make_batch(n_nodes, device)
 
-    # denominator
-    all_ones = torch.ones([ks.shape[0]]).to(ks.device)  # [N]
-    ks_sum = torch.einsum("lhm,l->hm", ks, all_ones)
-    attention_normalizer = torch.einsum("nhm,hm->nh", qs, ks_sum)  # [N, H]
+    q_pad = to_pad(qs, node_mask, max_node, batch_size)  # [B, M, H, D]
+    k_pad = to_pad(ks, node_mask, max_node, batch_size)  # [B, M, H, D]
+    v_pad = to_pad(vs, node_mask, max_node, batch_size)  # [B, M, H, D]
+    qk_pad = torch.einsum('abcd,aecd->abce', q_pad, k_pad)
+    # [B, M, H, M]
 
-    # attentive aggregated results
-    attention_normalizer = torch.unsqueeze(
-        attention_normalizer, len(attention_normalizer.shape)
-    )  # [N, H, 1]
-    attention_normalizer += torch.ones_like(attention_normalizer) * N
-    attn_output = attention_num / attention_normalizer  # [N, H, D]
+    n_heads, v_dim = vs.shape[-2:]
+    v_sum = torch.zeros((batch_size, n_heads, v_dim)).to(device)
+    v_idx = batch.reshape(-1, 1, 1).repeat(1, n_heads, v_dim)
+    v_sum.scatter_add_(dim=0, index=v_idx, src=vs)  # [B, H, D]
 
+    numerator = torch.einsum('abcd,adce->abce', qk_pad, v_pad)
+    numerator = numerator[node_mask] + v_sum[batch] # [N, H, D]
+
+    denominator = qk_pad[node_mask].sum(dim=-1)  # [N, H]
+    denominator += torch.index_select(
+        n_nodes.float(), dim=0, index=batch
+    ).unsqueeze(dim=-1)
+
+    attn_output = numerator / denominator.unsqueeze(dim=-1) # [N, H, D]
     return attn_output
 
 
@@ -164,34 +167,21 @@ def norm_adj_comp(x, edge_index, edge_weight=None):
 
 
 def attn_comp(qs, ks, n_nodes=None, block_wise=False):
-    if block_wise:
-        device = qs.device
-        node_mask, max_node = make_batch_mask(n_nodes, device)
-        batch_size, batch = len(n_nodes), make_batch(n_nodes, device)
-        q_pad = to_pad(qs, node_mask, max_node, batch_size)  # [B, M, H, D]
-        k_pad = to_pad(ks, node_mask, max_node, batch_size)  # [B, M, H, D]
-        qk_pad = torch.einsum('abcd,aecd->abce', q_pad, k_pad)
-        # [B, M, H, M]
-        useful_block = []
-        for idx, np in enumerate(n_nodes):
-            useful_block.append(qk_pad[idx, :np, :, :np] + 1)
+    device = qs.device
+    node_mask, max_node = make_batch_mask(n_nodes, device)
+    batch_size, batch = len(n_nodes), make_batch(n_nodes, device)
+    q_pad = to_pad(qs, node_mask, max_node, batch_size)  # [B, M, H, D]
+    k_pad = to_pad(ks, node_mask, max_node, batch_size)  # [B, M, H, D]
+    qk_pad = torch.einsum('abcd,aecd->abce', q_pad, k_pad)
+    # [B, M, H, M]
+    
 
-        N, heads = qs.shape[:2]
-        attention_num = torch.zeros((N, N, heads)).to(device)
+    useful_block = []
+    for idx, np in enumerate(n_nodes):
+        useful_block.append(qk_pad[idx, :np, :, :np] + 1)
 
-        for i in range(heads):
-            attention_num[:, :, i] = torch.block_diag(*[
-                x[:, i, :] for x in useful_block
-            ])
 
-        attention_normalizer = attention_num.sum(
-            dim=1, keepdim=True)  # [N, 1, H]
-
-    else:
-        qks = torch.einsum("nhd,lhd->nlh", qs, ks)  # [N, N, H]
-        attention_num = qks + torch.ones_like(qks)  # (N, N, H)
-        attention_normalizer = attention_num.sum(
-            dim=1, keepdim=True)  # [N, 1, H]
+    attention_normalizer = attention_num.sum(dim=1, keepdim=True)  # [N, 1, H]
 
     return attention_num / attention_normalizer
 
@@ -238,12 +228,15 @@ class GloAttnConv(nn.Module):
         ks = key / torch.norm(key, p=2, dim=2, keepdim=True)  # (N, H, D)
 
         if self.solver == 'series':
-            xs = x.unsqueeze(1).repeat(1, self.num_heads, 1)  # [N, H, D]
+            x = x.unsqueeze(1).repeat(1, self.num_heads, 1)  # [N, H, D]
+            x_ = [x]
             for i in range(self.K_order):
-                gcn_i = gcn_conv(xs, edge_index, edge_weight)
-                attn_i = fast_attn_conv(qs, ks, xs, n_nodes)
-                xs += self.beta * gcn_i + (1 - self.beta) * attn_i
-            x = x.reshape(-1, self.num_heads * self.in_channels)  # [N, H*D]
+                gcn_i = gcn_conv(x_[-1], adj_t)
+                attn_i = fast_attn_conv(qs, ks, x_[-1], n_nodes)
+                x_i = self.beta * gcn_i + (1 - self.beta) * attn_i
+                x_.append(x_i)
+            x = torch.stack(x_, dim=-1).sum(-1) # [N, H, D, K+1] -> [N, H, D]
+            x = x.reshape(-1, self.num_heads * self.in_channels) # [N, H*D]
         elif self.solver == 'inverse':
             S = attn_comp(qs, ks, n_nodes, block_wise)  # [N, N, H]
             A_tilde = norm_adj_comp(x, edge_index, edge_weight)  # [N, N]

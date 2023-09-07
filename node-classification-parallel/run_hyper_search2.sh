@@ -1,48 +1,48 @@
 datasets=('arxiv' 'twitch')
 dev=0
 
-#for a in 0.1 0.3 0.5 0.7
-#do
-#  for b in 1
-#    do
-#    for c in 1 2 4 8 16
-#    do
-#      for d in 1e4
-#      do
-#        for e in 0.2
-#        do
-#          python main.py --dataset twitch --method ours3 --lr 1e-4 --weight_decay 0. --num_layers 1 --beta $a \
-#--hidden_channels 64 --num_heads $b --K_order $c --kernel simple --use_residual --use_block \
-#--use_reg --reg_weight $d --num_aug_branch 5 --modify_ratio $e --rewiring_type replace \
-#--runs 1 --epochs 500 --seed 123 --device 2 --save_result
-#        done
-#      done
-#    done
-#  done
-#done
-
-for a in 0.5
+for a in 0.1 0.3 0.5 0.8
 do
   for b in 1 2 4
     do
-    for c in 1
+    for c in 1 2 4 8 12
     do
-      for d in 0.1 0.5 1.0 5.0 1e1
+      for d in 1 2 3
       do
-        for e in 0.1 0.2 0.3 0.4 0.5
+        for e in 32 64 128
         do
-          for f in 'replace' 'delete'
-          do
-          python main.py --dataset twitch --method ours3 --lr 1e-4 --weight_decay 0. --num_layers 1 --beta $a \
---hidden_channels 64 --num_heads $b --K_order $c --kernel simple --use_residual --use_block \
---use_reg --reg_weight $d --num_aug_branch 5 --modify_ratio $e --rewiring_type $f \
+          python main.py --dataset twitch --method ours3 --lr 0.0001 --num_layers $d --beta $a \
+--hidden_channels $e --num_heads $b --solver series --K_order $c --use_residual \
 --runs 1 --epochs 500 --seed 123 --device 2 --save_result
-          done
         done
       done
     done
   done
 done
+
+
+#for a in 0.5
+#do
+#  for b in 1 2 4
+#    do
+#    for c in 1
+#    do
+#      for d in 0.1 0.5 1.0 5.0 1e1
+#      do
+#        for e in 0.1 0.2 0.3 0.4 0.5
+#        do
+#          for f in 'replace' 'delete'
+#          do
+#          python main.py --dataset twitch --method ours3 --lr 1e-4 --weight_decay 0. --num_layers 1 --beta $a \
+#--hidden_channels 64 --num_heads $b --K_order $c --kernel simple --use_residual --use_block \
+#--use_reg --reg_weight $d --num_aug_branch 5 --modify_ratio $e --rewiring_type $f \
+#--runs 1 --epochs 500 --seed 123 --device 2 --save_result
+#          done
+#        done
+#      done
+#    done
+#  done
+#done
 
 
 #for a in 1e4
