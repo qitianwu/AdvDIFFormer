@@ -43,28 +43,6 @@ def gnn_high_order_conv(x, edge_index, K, edge_attr):
 
     
 
-# def gnn_high_order_conv(x, edge_index, K, edge_attr):
-
-#     N, Dim = x.shape
-#     row, col = edge_index
-#     adj_t = torch.zeros((N, N)).to(x.device)
-#     adj_t[row, col] = 1
-#     deg = adj_t.sum(dim=1)
-#     deg_inv_sqrt = deg.pow(-0.5)
-#     deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-#     adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
-
-#     xs = [x]
-#     for _ in range(1, K + 1):
-#         message_edge = torch.zeros_like(x).to(x.device)
-#         edge_src = adj_t[row, col].unsqueeze(-1) * edge_attr
-#         edge_idx = col.unsqueeze(-1).repeat(1, Dim)
-#         message_edge.scatter_add_(dim=0, index=edge_idx, src=edge_src)
-#         xs += [(adj_t @ x) + message_edge]
-#         adj_t = torch.matmul(adj_t, adj_t)
-
-#     return torch.cat(xs, dim=1)  # [N, D * (1+K)]
-
 def rewiring(edge_index, batch, ratio, edge_attr=None, type='delete'):
     edge_num, batch_size = edge_index.shape[1], batch.max() + 1
 

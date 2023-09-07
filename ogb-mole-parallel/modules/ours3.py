@@ -4,33 +4,34 @@ import math
 import numpy as np
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
-from torch_geometric.utils import erdos_renyi_graph, remove_self_loops, add_self_loops, degree, add_remaining_self_loops, negative_sampling
 from torch_geometric.nn import GCNConv
-from data_utils import sys_normalized_adjacency, sparse_mx_to_torch_sparse_tensor
 from torch_sparse import SparseTensor, matmul
 import torch_scatter
+
 
 def rewiring(edge_index, batch, ratio, edge_attr=None, type='delete'):
     edge_num, batch_size = edge_index.shape[1], batch.max() + 1
 
     if type == 'replace':
-        num_nodes = torch_scatter.scatter(torch.ones_like(batch), batch) # [B]
-        shift = torch.cumsum(num_nodes, dim=0) # [B]
+        num_nodes = torch_scatter.scatter(torch.ones_like(batch), batch)  # [B]
+        shift = torch.cumsum(num_nodes, dim=0)  # [B]
 
-        idx = torch.randint(0, edge_num, (int(ratio * edge_num),)) # [e]
+        idx = torch.randint(0, edge_num, (int(ratio * edge_num),))  # [e]
         srx_idx_, end_idx_ = edge_index[:, idx]
         batchs = batch[end_idx_]  # [e]
-        shifts = shift[batchs] # [e]
+        shifts = shift[batchs]  # [e]
 
-        srx_idx_new = torch.randint(0, edge_num, (idx.shape[0], )).to(batch.device) # [e]
-        srx_idx_new = torch.remainder(srx_idx_new, shifts) # [e]
+        srx_idx_new = torch.randint(
+            0, edge_num, (idx.shape[0], )).to(batch.device)  # [e]
+        srx_idx_new = torch.remainder(srx_idx_new, shifts)  # [e]
         edge_index[0, idx] = srx_idx_new
     else:
         srx_idx, end_idx = edge_index
         mask = torch.ones_like(srx_idx).bool()
         idx = torch.randint(0, edge_num, (int(ratio * edge_num),))  # [e]
         mask[idx] = False
-        edge_index = torch.stack([srx_idx[mask], end_idx[mask]], dim=0) # [2, E - e]
+        edge_index = torch.stack(
+            [srx_idx[mask], end_idx[mask]], dim=0)  # [2, E - e]
         if edge_attr is not None:
             edge_attr = edge_attr[mask]
 
@@ -38,6 +39,7 @@ def rewiring(edge_index, batch, ratio, edge_attr=None, type='delete'):
         return edge_index, edge_attr
     else:
         return edge_index
+
 
 def make_batch_mask(n_nodes, device='cpu'):
     max_node = n_nodes.max().item()
@@ -63,28 +65,32 @@ def to_pad(feat, mask, max_node, batch_size):
 
 
 def gcn_conv(x, edge_index, edge_weight=None):
-    N, H = x.shape[0], x.shape[1]
-    row, col = edge_index
-    if edge_weight is None:
-        value = torch.ones(edge_index.shape[1], dtype=torch.float).to(x.device)
-    else:
-        value = edge_weight
-    adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(N, N))
+    # x: [N_tot, H, D]
+    num_edge, device = edge_index.shape[1], x.device
+    (row, col), (N, H, D) = edge_index, x.shape
+    values = edge_weight if edge_weight is not None\
+        else torch.ones(num_edge).to(device)
 
-    deg = adj_t.sum(dim=1).to(torch.float)
-    deg_inv_sqrt = deg.pow(-0.5)
-    deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-    adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
+    deg = torch.zeros(N).to(device)
 
-    x_ = []
-    for h in range(H):
-        x_h = x[:, h] # [N, D]
-        x_.append(adj_t @ x_h)
-    return torch.stack(x_, dim=1) # [N, H, D]
+    deg.scatter_add_(dim=0, index=row, src=values)
+
+    deg_inv_sqrt = torch.zeros_like(deg)
+
+    deg_inv_sqrt[deg > 0] = deg[deg > 0] ** (-0.5)
+
+    adj_t_value = deg_inv_sqrt[row] * deg_inv_sqrt[col] * values
+
+    new_feat = torch.zeros_like(x)
+
+    new_feat.scatter_add_(
+        dim=0, index=row.reshape(-1, 1, 1).repeat(1, H, D),
+        src=x[col] * adj_t_value.reshape(-1, 1, 1)
+    )
+    return new_feat
 
 
-
-def fast_attn_conv(qs, ks, vs, n_nodes=None, block_wise=False):
+def fast_attn_conv(qs, ks, vs, n_nodes):
     '''
     qs: query tensor [N, H, D]
     ks: key tensor [N, H, D]
@@ -93,130 +99,121 @@ def fast_attn_conv(qs, ks, vs, n_nodes=None, block_wise=False):
 
     return output [N, H, D]
     '''
-    if block_wise:
-        # normalize input
-        qs = qs / torch.norm(qs, p=2, dim=2, keepdim=True)  # (N, H, D)
-        ks = ks / torch.norm(ks, p=2, dim=2, keepdim=True)  # (N, H, D)
 
-        # numerator
+    # numerator
+    device = qs.device
+    node_mask, max_node = make_batch_mask(n_nodes, device)
+    batch_size, batch = len(n_nodes), make_batch(n_nodes, device)
 
-        device = qs.device
-        node_mask, max_node = make_batch_mask(n_nodes, device)
-        batch_size, batch = len(n_nodes), make_batch(n_nodes, device)
+    q_pad = to_pad(qs, node_mask, max_node, batch_size)  # [B, M, H, D]
+    k_pad = to_pad(ks, node_mask, max_node, batch_size)  # [B, M, H, D]
+    v_pad = to_pad(vs, node_mask, max_node, batch_size)  # [B, M, H, D]
 
-        q_pad = to_pad(qs, node_mask, max_node, batch_size)  # [B, M, H, D]
-        k_pad = to_pad(ks, node_mask, max_node, batch_size)  # [B, M, H, D]
-        v_pad = to_pad(vs, node_mask, max_node, batch_size)  # [B, M, H, D]
-        qk_pad = torch.einsum('abcd,aecd->abce', q_pad, k_pad)
-        # [B, M, H, M]
+    kv_pad = torch.einsum('abcd,abce->adce', k_pad, v_pad) 
+    # [B, D, H, D]
 
-        n_heads, v_dim = vs.shape[-2:]
-        v_sum = torch.zeros((batch_size, n_heads, v_dim)).to(device)
-        v_idx = batch.reshape(-1, 1, 1).repeat(1, n_heads, v_dim)
-        v_sum.scatter_add_(dim=0, index=v_idx, src=vs)  # [B, H, D]
+    (n_heads, v_dim), k_dim = vs.shape[-2:], ks.shape[-1]
+    v_sum = torch.zeros((batch_size, n_heads, v_dim)).to(device)
+    v_idx = batch.reshape(-1, 1, 1).repeat(1, n_heads, v_dim)
+    v_sum.scatter_add_(dim=0, index=v_idx, src=vs)  # [B, H, D]
 
-        numerator = torch.einsum('abcd,adce->abce', qk_pad, v_pad)
-        numerator = numerator[node_mask] + \
-            torch.index_select(v_sum, dim=0, index=batch)
-        # [N, H, D]
+    numerator = torch.einsum('abcd,adce->abce', q_pad, kv_pad)
+    numerator = numerator[node_mask] + v_sum[batch]
 
-        denominator = qk_pad[node_mask].sum(dim=-1)  # [N, H]
-        denominator += torch.index_select(
-            n_nodes.float(), dim=0, index=batch
-        ).unsqueeze(dim=-1)
 
-        attn_output = numerator / denominator.unsqueeze(dim=-1) # [N, H, D]
+    k_sum = torch.zeros((batch_size, n_heads, k_dim)).to(device)
+    k_sum.scatter_add_(dim=0, index=v_idx, src=ks) #[B, H, D]
+    denominator = torch.einsum('abcd,acd->abc', q_pad, k_sum)
+    denominator = denominator[node_mask] + torch.index_select(
+        n_nodes.float(), dim=0, index=batch
+    ).unsqueeze(dim=-1)
 
-    else:
-        # normalize input
-        qs = qs / torch.norm(qs, p=2, dim=2, keepdim=True)  # (N, H, D)
-        ks = ks / torch.norm(ks, p=2, dim=2, keepdim=True)  # (N, H, D)
-        N = qs.shape[0]
-
-        # numerator
-        kvs = torch.einsum("lhm,lhd->hmd", ks, vs)
-        attention_num = torch.einsum("nhm,hmd->nhd", qs, kvs)  # [N, H, D]
-        all_ones = torch.ones([vs.shape[0]]).to(vs.device)
-        vs_sum = torch.einsum("l,lhd->hd", all_ones, vs)  # [H, D]
-        # [N, H, D]
-        attention_num += vs_sum.unsqueeze(0).repeat(vs.shape[0], 1, 1)
-
-        # denominator
-        all_ones = torch.ones([ks.shape[0]]).to(ks.device)  # [N]
-        ks_sum = torch.einsum("lhm,l->hm", ks, all_ones)
-        attention_normalizer = torch.einsum(
-            "nhm,hm->nh", qs, ks_sum
-        )  # [N, H]
-
-        # attentive aggregated results
-        attention_normalizer = torch.unsqueeze(
-            attention_normalizer, len(attention_normalizer.shape)
-        )  # [N, H, 1]
-        attention_normalizer += torch.ones_like(attention_normalizer) * N
-        attn_output = attention_num / attention_normalizer  # [N, H, D]
-    
+    attn_output = numerator / denominator.unsqueeze(dim=-1) # [N, H, D]
     return attn_output
 
 
-def norm_adj_comp(x, edge_index, edge_weight=None):
-    N, H = x.shape[0], x.shape[1]
-    row, col = edge_index
-    if edge_weight is None:
-        value = torch.ones(edge_index.shape[1], dtype=torch.float).to(x.device)
-    else:
-        value = edge_weight
-    adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(N, N))
-
-    deg = adj_t.sum(dim=1).to(torch.float)
-    deg_inv_sqrt = deg.pow(-0.5)
-    deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-    adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
-    return adj_t.to_dense()
+def make_diag_mask(node_mask, max_node, BS):
+    ones_block = torch.zeros((BS, max_node, max_node)).to(node_mask.device)
+    ones_block[node_mask] = 1
+    ones_block = ones_block.transpose(1, 2)
+    ones_block[~node_mask] = 0
+    ones_block = ones_block.transpose(1, 2)
+    return ones_block.bool()
 
 
-def attn_comp(qs, ks, n_nodes=None, block_wise=False):
-    if block_wise:
-        device = qs.device
-        node_mask, max_node = make_batch_mask(n_nodes, device)
-        batch_size, batch = len(n_nodes), make_batch(n_nodes, device)
-        q_pad = to_pad(qs, node_mask, max_node, batch_size)  # [B, M, H, D]
-        k_pad = to_pad(ks, node_mask, max_node, batch_size)  # [B, M, H, D]
-        qk_pad = torch.einsum('abcd,aecd->abce', q_pad, k_pad)
-        # [B, M, H, M]
-        useful_block = []
-        for idx, np in enumerate(n_nodes):
-            useful_block.append(qk_pad[idx, :np, :, :np] + 1)
-        
-        N, heads = qs.shape[:2]
-        attention_num = torch.zeros((N, N, heads)).to(device)
+def make_ptr_from_batch(batch, batch_size=None):
+    if batch_size is None:
+        batch_size = batch.max().item() + 1
+    ptr = torch.zeros(batch_size).to(batch)
+    ptr.scatter_add_(dim=0, src=torch.ones_like(batch), index=batch)
+    ptr = torch.cat([torch.Tensor([0]).to(batch.device), ptr], dim=0)
+    ptr = torch.cumsum(ptr, dim=0).long()
+    return ptr
 
-        for i in range(heads):
-            attention_num[:, :, i] = torch.block_diag(*[
-                x[:, i, :] for x in useful_block
-            ])
 
-        attention_normalizer = attention_num.sum(dim=1, keepdim=True) # [N, 1, H]
+def prepare_data_inverse(
+    qs, ks, x, n_nodes, edge_index, beta, theta,
+    edge_weight=None
+):
+    # compute adj_t for gcn
 
-    else:
-        qks = torch.einsum("nhd,lhd->nlh", qs, ks)  # [N, N, H]
-        attention_num = qks + torch.ones_like(qks)  # (N, N, H)
-        attention_normalizer = attention_num.sum(dim=1, keepdim=True)  # [N, 1, H]
+    num_edge, device = edge_index.shape[1], x.device
+    (row, col), N, D = edge_index, x.shape[0], x.shape[-1]
+    values = edge_weight if edge_weight is not None\
+        else torch.ones(num_edge).to(device)
 
-    return attention_num / attention_normalizer
+    node_mask, max_node = make_batch_mask(n_nodes, device)
+    batch_size, batch = len(n_nodes), make_batch(n_nodes, device)
+    ptr = make_ptr_from_batch(batch)
 
+    deg = torch.zeros(N).to(device)
+    deg.scatter_add_(dim=0, index=row, src=values)
+    deg_inv = torch.zeros_like(deg)
+    deg_inv[deg > 0] = 1. / deg[deg > 0]
+    adj_t_value = deg_inv[row] * values
+
+    adj_t = torch.zeros(batch_size, max_node, max_node).to(device)
+
+    # two edges in the same batch
+    e_batch = batch[row]
+    adj_t[e_batch, row - ptr[e_batch], col - ptr[e_batch]] = adj_t_value
+
+    # compute attention
+
+    q_pad = to_pad(qs, node_mask, max_node, batch_size)  # [B, M, H, D]
+    k_pad = to_pad(ks, node_mask, max_node, batch_size)  # [B, M, H, D]
+    qk_pad = torch.einsum('abcd,aecd->abce', q_pad, k_pad)
+    # [B, M, H, M]
+    qk_pad = qk_pad.transpose(2, 3)
+
+    diag_mask = make_diag_mask(node_mask, max_node, batch_size)
+    ones_block = torch.zeros_like(qk_pad)
+    ones_block[diag_mask] = 1
+
+    attention_num = qk_pad + ones_block
+    attention_normalizer = attention_num.sum(dim=2, keepdim=True)
+    # [B, M, M, H]
+    S = attention_num / attention_normalizer
+
+    A_prime = (1 - beta) * S + beta * adj_t.unsqueeze(dim=-1)  # [B, M, M, H]
+    identy = torch.eye(max_node).reshape(1, max_node, -1, 1).to(device)
+    L = -A_prime + (1 + theta) * identy
+
+    x_batch = torch.zeros(batch_size, max_node, x.shape[-1]).to(devive)
+    x_batch[node_mask] = x
+
+    return L_h, x_batch, node_mask
 
 
 class GloAttnConv(nn.Module):
     '''
     one global attention layer
     '''
-    def __init__(self, in_channels,
-               out_channels,
-               K_order=4,
-               num_heads=1,
-               beta=0.5,
-               theta=0.,
-               solver='series'):
+
+    def __init__(
+        self, in_channels, out_channels, K_order=4, num_heads=1,
+        beta=0.5, theta=0., solver='series'
+    ):
         super(GloAttnConv, self).__init__()
         self.Wk = nn.Linear(in_channels, in_channels * num_heads)
         self.Wq = nn.Linear(in_channels, in_channels * num_heads)
@@ -237,10 +234,8 @@ class GloAttnConv(nn.Module):
         self.Wk.reset_parameters()
         self.Wq.reset_parameters()
         self.Wo.reset_parameters()
-        # for fc in self.Wo:
-        #     fc.reset_parameters()
 
-    def forward(self, x, edge_index, edge_weight=None, n_nodes=None, block_wise=False):
+    def forward(self, x, edge_index, n_nodes, edge_weight=None):
         query = self.Wq(x).reshape(-1, self.num_heads, self.in_channels)
         key = self.Wk(x).reshape(-1, self.num_heads, self.in_channels)
 
@@ -254,27 +249,29 @@ class GloAttnConv(nn.Module):
             x_ = [x]
             for i in range(self.K_order):
                 gcn_i = gcn_conv(x_[-1], edge_index, edge_weight)
-                attn_i = fast_attn_conv(qs, ks, x_[-1], n_nodes, block_wise)
+                attn_i = fast_attn_conv(qs, ks, x_[-1], n_nodes)
                 x_i = self.beta * gcn_i + (1 - self.beta) * attn_i
                 x_.append(x_i)
-            x = torch.stack(x_, dim=-1).sum(-1) # [N, H, D, K+1] -> [N, H, D]
-            x = x.reshape(-1, self.num_heads * self.in_channels) # [N, H*D]
+            x = torch.stack(x_, dim=-1).sum(-1)  # [N, H, D, K+1] -> [N, H, D]
+            x = x.reshape(-1, self.num_heads * self.in_channels)  # [N, H*D]
         elif self.solver == 'inverse':
-            S = attn_comp(qs, ks, n_nodes, block_wise) # [N, N, H]
-            A_tilde = norm_adj_comp(x, edge_index, edge_weight) # [N, N]
+            L, x_batch, node_mask = prepare_data_inverse(
+                qs=qs, ks=ks, x=x, n_nodes=n_nodes, edge_index=edge_index,
+                beta=self.beta, theta=self.theta, edge_weight=edge_weight
+            )
             x_ = []
             for h in range(self.num_heads):
-                A_h = (1 - self.beta) * S[:, :, h] + self.beta * A_tilde # [N, N]
-                L_h = (1 + self.theta) * torch.eye(x.shape[0]).to(A_h.device) - A_h
-                x_h = torch.linalg.solve(L_h, x) # [N, D]
-                x_ += [x_h]
-            x = torch.cat(x_, dim=1) # [N, H*D]
+                L_h = L[:, :, :, h]
+                x_h = torch.linalg.solve(L_h, x)  # [B, M, D]
+                x_ .append(x_h[node_mask])  # [N, D]
+            x = torch.cat(x_, dim=1)  # [N, H * D]
         else:
             raise NotImplementedError
 
-        x_out = self.Wo(x) / self.num_heads # [N, D]
+        x_out = self.Wo(x) / self.num_heads  # [N, D]
 
         return x_out
+
 
 class PCFormer(nn.Module):
     '''
@@ -283,8 +280,12 @@ class PCFormer(nn.Module):
     edge_index: 2-dim indices of edges [2, E]
     return y_hat predicted logits [N, C]
     '''
-    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=1, num_heads=1, solver='series',
-                    K_order=3, beta=0.5, theta=0., dropout=0.5, use_bn=True, use_residual=True):
+
+    def __init__(
+        self, in_channels, hidden_channels, out_channels, num_layers=1,
+        num_heads=1, solver='series', K_order=3, beta=0.5, theta=0.,
+        dropout=0.5, use_bn=True, use_residual=True
+    ):
         super(PCFormer, self).__init__()
 
         self.fcs = nn.ModuleList()
@@ -293,8 +294,10 @@ class PCFormer(nn.Module):
         self.bns.append(nn.BatchNorm1d(hidden_channels))
         self.convs = nn.ModuleList()
         for i in range(num_layers):
-            self.convs.append(
-                GloAttnConv(hidden_channels, hidden_channels, K_order=K_order, num_heads=num_heads, beta=beta, theta=theta, solver=solver))
+            self.convs.append(GloAttnConv(
+                hidden_channels, hidden_channels, K_order=K_order,
+                num_heads=num_heads, beta=beta, theta=theta, solver=solver
+            ))
             self.bns.append(nn.BatchNorm1d(hidden_channels))
         self.fcs.append(nn.Linear(hidden_channels, out_channels))
 
@@ -313,13 +316,8 @@ class PCFormer(nn.Module):
         for fc in self.fcs:
             fc.reset_parameters()
 
-    def forward(self, x, edge_index, batch=None, edge_weight=None, block_wise=False):
-
-        if block_wise:
-            n_nodes = torch_scatter.scatter(torch.ones_like(batch), batch) # [B]
-        else:
-            n_nodes = None
-
+    def forward(self, x, edge_index, batch, edge_weight=None):
+        n_nodes = torch_scatter.scatter(torch.ones_like(batch), batch)
         layer_ = []
 
         # input MLP layer
@@ -333,7 +331,7 @@ class PCFormer(nn.Module):
         layer_.append(x)
 
         for i in range(self.num_layers):
-            x = self.convs[i](x, edge_index, edge_weight, n_nodes, block_wise)
+            x = self.convs[i](x, edge_index, n_nodes, edge_weight)
             if self.residual:
                 x += layer_[i]
             if self.use_bn:
@@ -368,19 +366,21 @@ class PCFormer(nn.Module):
 
     # rewiring as augmentation
     def loss_compute(self, d, criterion, args):
-        logits = self.forward(d.x, d.edge_index, d.batch, block_wise=args.use_block)[d.train_idx]
+        logits = self(d.x, d.edge_index, d.batch)[d.train_idx]
         y = d.y[d.train_idx]
         sup_loss = self.sup_loss_calc(y, logits, criterion, args)
         if args.use_reg:
             reg_loss_ = []
             for i in range(args.num_aug_branch):
-                edge_index_i = rewiring(d.edge_index.clone(), d.batch, args.modify_ratio, type=args.rewiring_type)
+                edge_index_i = rewiring(
+                    d.edge_index.clone(), d.batch,
+                    args.modify_ratio, type=args.rewiring_type
+                )
 
-                logits_i = self.forward(d.x, edge_index_i, d.batch, block_wise=args.use_block)[d.train_idx]
+                logits_i = self(d.x, edge_index_i, d.batch)[d.train_idx]
                 reg_loss_i = self.sup_loss_calc(y, logits_i, criterion, args)
                 reg_loss_.append(reg_loss_i)
-                # reg_loss_.append(torch.relu(reg_loss_i - sup_loss) ** 2)
-            # loss_reg = torch.mean(torch.stack(reg_loss_))
+
             reg_loss = torch.mean(torch.stack(reg_loss_))
             print(sup_loss.data, reg_loss.data)
             loss = sup_loss + args.reg_weight * reg_loss

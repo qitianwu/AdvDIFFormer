@@ -110,14 +110,14 @@ def evaluate_single_graph(model, dataset_tr, dataset_val, dataset_te, eval_func,
     if args.use_block:
         out = model(dataset_tr.x, dataset_tr.edge_index, dataset_tr.batch, block_wise=args.use_block).cpu()
     else:
-        out = model(dataset_tr.x, dataset_tr.edge_index).cpu()
+        out = model(dataset_tr.x, dataset_tr.edge_index, dataset_tr.batch).cpu()
     train_acc = eval_func(y[dataset_tr.train_idx], out[dataset_tr.train_idx])
 
     y = dataset_val.y.cpu()
     if args.use_block:
         out = model(dataset_val.x, dataset_val.edge_index, dataset_val.batch, block_wise=args.use_block).cpu()
     else:
-        out = model(dataset_val.x, dataset_val.edge_index).cpu()
+        out = model(dataset_val.x, dataset_val.edge_index, dataset_val.batch).cpu()
     valid_acc = eval_func(y[dataset_val.valid_idx], out[dataset_val.valid_idx])
 
     test_accs = []
@@ -126,7 +126,7 @@ def evaluate_single_graph(model, dataset_tr, dataset_val, dataset_te, eval_func,
         if args.use_block:
             out = model(d.x, d.edge_index, d.batch, block_wise=args.use_block).cpu()
         else:
-            out = model(d.x, d.edge_index).cpu()
+            out = model(d.x, d.edge_index, d.batch).cpu()
         test_accs.append(eval_func(y[d.test_idx], out[d.test_idx]))
     result = [train_acc, valid_acc] + test_accs
 
