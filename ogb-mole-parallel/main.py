@@ -5,6 +5,7 @@ from modules.GNNs import GNN
 from modules.SAGE import SAGEMol
 from modules.ours import DIFFormerMol
 from modules.ours2 import Ours as DIF2
+from modules.ours3 import Ours as F3
 from modules.utils import get_device
 import torch_geometric
 from tqdm import tqdm
@@ -194,7 +195,7 @@ def main():
         help='filename to save model'
     )
 
-    parser.add_argument('--gnn_type', type=str, default='gcn', choices=['gcn', 'sage', 'gat', 'DIFF2'])
+    parser.add_argument('--gnn_type', type=str, default='gcn', choices=['gcn', 'sage', 'gat', 'DIFF2', 'F3'])
     parser.add_argument('--num_heads', type=int, default=1,
                         help='number of heads for attention')
     parser.add_argument('--alpha', type=float, default=0.5, help='weight for residual link')
@@ -209,6 +210,9 @@ def main():
     parser.add_argument('--use_block', action='store_true', help='compute all-pair attention within each block')
     parser.add_argument('--rewiring_type', type=str, default='delete', choices=['delete', 'replace'])
     parser.add_argument('--K_order', type=int, default=3, help='the order of New Impl')
+    parser.add_argument('--beta', type=float, default=0.5, help='weight for local and global prop')
+    parser.add_argument('--theta', type=float, default=0., help='weight for identity mapping in Laplacian prop')
+    parser.add_argument('--solver', type=str, default='series', choices=['series', 'inverse'])
 
 
     args = parser.parse_args()
@@ -252,6 +256,13 @@ def main():
             num_tasks=dataset.num_tasks, num_layer=args.num_layer, emb_dim=args.emb_dim,
             pooling='mean', num_heads=args.num_heads, kernel=args.kernel, alpha=args.alpha,
             dropout=args.dropout, use_bn=args.use_bn, use_residual=args.use_residual, K_order=args.K_order
+        ).to(device)
+    elif: args.gnn_type == 'F3':
+        model = F3(
+            emb_dim=args.emb_dim, num_layer=args.num_layer, num_tasks=dataset.num_tasks, 
+            num_heads=args.num_heads, solver=args.solver, K_order=args.K_order, 
+            beta=args.beta, dropout=args.dropout, use_bn=args.use_bn, use_residual=args.usb_residual,
+            pooling='mean', theta=args.theta
         ).to(device)
     else:
         model = DIFFormerMol(

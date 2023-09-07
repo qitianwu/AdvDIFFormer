@@ -122,7 +122,8 @@ def fast_attn_conv(qs, ks, vs, n_nodes):
 
 
     k_sum = torch.zeros((batch_size, n_heads, k_dim)).to(device)
-    k_sum.scatter_add_(dim=0, index=v_idx, src=ks) #[B, H, D]
+    k_idx = batch.reshape(-1, 1, 1).repeat(1, n_heads, k_dim)
+    k_sum.scatter_add_(dim=0, index=k_idx, src=ks) #[B, H, D]
     denominator = torch.einsum('abcd,acd->abc', q_pad, k_sum)
     denominator = denominator[node_mask] + torch.index_select(
         n_nodes.float(), dim=0, index=batch

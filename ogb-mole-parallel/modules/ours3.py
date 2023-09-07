@@ -3,10 +3,9 @@ import torch
 import math
 import numpy as np
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
-from torch_geometric.nn import GCNConv
-from torch_sparse import SparseTensor, matmul
 import torch_scatter
+from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
+from modules.utils import get_pool
 
 
 def rewiring(edge_index, batch, ratio, edge_attr=None, type='delete'):
@@ -64,12 +63,11 @@ def to_pad(feat, mask, max_node, batch_size):
     return new_feat
 
 
-def gcn_conv(x, edge_index, edge_weight=None):
+def gcn_conv(x, edge_index, edge_attr):
     # x: [N_tot, H, D]
     num_edge, device = edge_index.shape[1], x.device
     (row, col), (N, H, D) = edge_index, x.shape
-    values = edge_weight if edge_weight is not None\
-        else torch.ones(num_edge).to(device)
+    values = torch.ones(num_edge).to(device)
 
     deg = torch.zeros(N).to(device)
 
@@ -81,13 +79,20 @@ def gcn_conv(x, edge_index, edge_weight=None):
 
     adj_t_value = deg_inv_sqrt[row] * deg_inv_sqrt[col] * values
 
+    message_edge = torch.zeros(N, D).to(device)
+    edge_attr_src = adj_t_value.unsqueeze(-1) * edge_attr
+    message_edge.scatter_add_(
+        dim=0, src=edge_attr_src,
+        index=row.unsqueeze(-1).repeat(1, D)
+    )
+
     new_feat = torch.zeros_like(x)
 
     new_feat.scatter_add_(
         dim=0, index=row.reshape(-1, 1, 1).repeat(1, H, D),
         src=x[col] * adj_t_value.reshape(-1, 1, 1)
     )
-    return new_feat
+    return new_feat + message_edge.unsqueeze(1)
 
 
 def fast_attn_conv(qs, ks, vs, n_nodes):
@@ -109,7 +114,7 @@ def fast_attn_conv(qs, ks, vs, n_nodes):
     k_pad = to_pad(ks, node_mask, max_node, batch_size)  # [B, M, H, D]
     v_pad = to_pad(vs, node_mask, max_node, batch_size)  # [B, M, H, D]
 
-    kv_pad = torch.einsum('abcd,abce->adce', k_pad, v_pad) 
+    kv_pad = torch.einsum('abcd,abce->adce', k_pad, v_pad)
     # [B, D, H, D]
 
     (n_heads, v_dim), k_dim = vs.shape[-2:], ks.shape[-1]
@@ -120,15 +125,15 @@ def fast_attn_conv(qs, ks, vs, n_nodes):
     numerator = torch.einsum('abcd,adce->abce', q_pad, kv_pad)
     numerator = numerator[node_mask] + v_sum[batch]
 
-
     k_sum = torch.zeros((batch_size, n_heads, k_dim)).to(device)
-    k_sum.scatter_add_(dim=0, index=v_idx, src=ks) #[B, H, D]
+    k_idx = batch.reshape(-1, 1, 1).repeat(1, n_heads, k_dim)
+    k_sum.scatter_add_(dim=0, index=k_idx, src=ks)  # [B, H, D]
     denominator = torch.einsum('abcd,acd->abc', q_pad, k_sum)
     denominator = denominator[node_mask] + torch.index_select(
         n_nodes.float(), dim=0, index=batch
     ).unsqueeze(dim=-1)
 
-    attn_output = numerator / denominator.unsqueeze(dim=-1) # [N, H, D]
+    attn_output = numerator / denominator.unsqueeze(dim=-1)  # [N, H, D]
     return attn_output
 
 
@@ -152,8 +157,7 @@ def make_ptr_from_batch(batch, batch_size=None):
 
 
 def prepare_data_inverse(
-    qs, ks, x, n_nodes, edge_index, beta, theta,
-    edge_weight=None
+    qs, ks, x, n_nodes, edge_attr, edge_index, beta, theta,
 ):
     # compute adj_t for gcn
 
@@ -173,6 +177,14 @@ def prepare_data_inverse(
     adj_t_value = deg_inv[row] * values
 
     adj_t = torch.zeros(batch_size, max_node, max_node).to(device)
+
+    # compute message_edge
+    message_edge = torch.zeros(N, D).to(device)
+    edge_attr_src = adj_t_value.unsqueeze(-1) * edge_attr
+    message_edge.scatter_add_(
+        dim=0, src=edge_attr_src,
+        index=row.unsqueeze(-1).repeat(1, D)
+    )
 
     # two edges in the same batch
     e_batch = batch[row]
@@ -202,7 +214,7 @@ def prepare_data_inverse(
     x_batch = torch.zeros(batch_size, max_node, x.shape[-1]).to(devive)
     x_batch[node_mask] = x
 
-    return L_h, x_batch, node_mask
+    return L_h, x_batch, node_mask, message_edge
 
 
 class GloAttnConv(nn.Module):
@@ -229,13 +241,14 @@ class GloAttnConv(nn.Module):
         self.num_heads = num_heads
         self.solver = solver
         self.theta = theta
+        self.bond_encoder = BondEncoder(out_channels)
 
     def reset_parameters(self):
         self.Wk.reset_parameters()
         self.Wq.reset_parameters()
         self.Wo.reset_parameters()
 
-    def forward(self, x, edge_index, n_nodes, edge_weight=None):
+    def forward(self, x, edge_index, edge_attr, n_nodes):
         query = self.Wq(x).reshape(-1, self.num_heads, self.in_channels)
         key = self.Wk(x).reshape(-1, self.num_heads, self.in_channels)
 
@@ -244,26 +257,28 @@ class GloAttnConv(nn.Module):
         qs = query / torch.norm(query, p=2, dim=2, keepdim=True)  # (N, H, D)
         ks = key / torch.norm(key, p=2, dim=2, keepdim=True)  # (N, H, D)
 
+        edge_attr = self.bond_encoder(edge_attr)
+
         if self.solver == 'series':
             x = x.unsqueeze(1).repeat(1, self.num_heads, 1)  # [N, H, D]
             x_ = [x]
             for i in range(self.K_order):
-                gcn_i = gcn_conv(x_[-1], edge_index, edge_weight)
+                gcn_i = gcn_conv(x_[-1], edge_index, edge_attr)
                 attn_i = fast_attn_conv(qs, ks, x_[-1], n_nodes)
                 x_i = self.beta * gcn_i + (1 - self.beta) * attn_i
                 x_.append(x_i)
             x = torch.stack(x_, dim=-1).sum(-1)  # [N, H, D, K+1] -> [N, H, D]
             x = x.reshape(-1, self.num_heads * self.in_channels)  # [N, H*D]
         elif self.solver == 'inverse':
-            L, x_batch, node_mask = prepare_data_inverse(
+            L, x_batch, node_mask, e_message = prepare_data_inverse(
                 qs=qs, ks=ks, x=x, n_nodes=n_nodes, edge_index=edge_index,
-                beta=self.beta, theta=self.theta, edge_weight=edge_weight
+                beta=self.beta, theta=self.theta, edge_attr=edge_attr
             )
             x_ = []
             for h in range(self.num_heads):
                 L_h = L[:, :, :, h]
                 x_h = torch.linalg.solve(L_h, x)  # [B, M, D]
-                x_ .append(x_h[node_mask])  # [N, D]
+                x_.append((x_h + e_message)[node_mask])  # [N, D]
             x = torch.cat(x_, dim=1)  # [N, H * D]
         else:
             raise NotImplementedError
@@ -282,16 +297,13 @@ class PCFormer(nn.Module):
     '''
 
     def __init__(
-        self, in_channels, hidden_channels, out_channels, num_layers=1,
-        num_heads=1, solver='series', K_order=3, beta=0.5, theta=0.,
+        self, hidden_channels, num_layers=1, num_heads=1,
+        solver='series', K_order=3, beta=0.5, theta=0.,
         dropout=0.5, use_bn=True, use_residual=True
     ):
         super(PCFormer, self).__init__()
 
-        self.fcs = nn.ModuleList()
-        self.fcs.append(nn.Linear(in_channels, hidden_channels))
         self.bns = nn.ModuleList()
-        self.bns.append(nn.BatchNorm1d(hidden_channels))
         self.convs = nn.ModuleList()
         for i in range(num_layers):
             self.convs.append(GloAttnConv(
@@ -299,7 +311,6 @@ class PCFormer(nn.Module):
                 num_heads=num_heads, beta=beta, theta=theta, solver=solver
             ))
             self.bns.append(nn.BatchNorm1d(hidden_channels))
-        self.fcs.append(nn.Linear(hidden_channels, out_channels))
 
         self.dropout = dropout
         self.activation = F.relu
@@ -307,6 +318,7 @@ class PCFormer(nn.Module):
         self.residual = use_residual
         self.num_layers = num_layers
         self.K_order = K_order
+        self.atom_encoder = AtomEncoder(hidden_channels)
 
     def reset_parameters(self):
         for conv in self.convs:
@@ -316,74 +328,61 @@ class PCFormer(nn.Module):
         for fc in self.fcs:
             fc.reset_parameters()
 
-    def forward(self, x, edge_index, batch, edge_weight=None):
+    def forward(self, x, edge_index, edge_attr, batch):
         n_nodes = torch_scatter.scatter(torch.ones_like(batch), batch)
         layer_ = []
-
         # input MLP layer
-        x = self.fcs[0](x)
-        if self.use_bn:
-            x = self.bns[0](x)
-        x = self.activation(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
-
         # store each head
+
+        x = self.atom_encoder(x)
         layer_.append(x)
 
         for i in range(self.num_layers):
-            x = self.convs[i](x, edge_index, n_nodes, edge_weight)
+            x = self.convs[i](x, edge_index, edge_attr, n_nodes)
             if self.residual:
                 x += layer_[i]
             if self.use_bn:
-                x = self.bns[i+1](x)
+                x = self.bns[i](x)
             x = self.activation(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
             layer_.append(x)
 
         # output MLP layer
-        x_out = self.fcs[-1](x)
-        return x_out
+        return layer_[-1]
 
-    def sup_loss_calc(self, y, pred, criterion, args):
-        if args.dataset in ('twitch', 'elliptic', 'ppi', 'proteins'):
-            if y.shape[1] == 1:
-                true_label = F.one_hot(y, y.max() + 1).squeeze(1)
-            else:
-                true_label = y
-            loss = criterion(pred, true_label.squeeze(1).to(torch.float))
-        elif args.dataset in ('synthetic'):
-            loss = criterion(pred, y)
+
+class Ours(nn.Module):
+    def __init__(
+        self, emb_dim, num_layer, num_tasks, num_heads=1, solver='series',
+        K_order=3, beta=0.5, dropout=0.5, use_bn=True, use_residual=True,
+        pooling='mean', theta=0.
+    ):
+        super(Ours, self).__init__()
+        if pooling not in ['attention', 'set2set']:
+            self.pool = get_pool(pooling)
+        elif pooling == 'attention':
+            gate = torch.nn.Sequential(
+                torch.nn.Linear(emb_dim, 2 * emb_dim),
+                torch.nn.ReLU(),
+                torch.nn.Linear(emb_dim * 2, 1)
+            )
+            self.pool = torch_geometric.nn.GlobalAttention(gate_nn=gate)
         else:
-            out = F.log_softmax(pred, dim=1)
-            target = y.squeeze(1)
-            loss = criterion(out, target)
-        return loss
+            self.pool = torch_geometric.nn.Set2Set(emb_dim, processing_steps=2)
 
-    def print_weight(self):
-        for i, con in enumerate(self.convs):
-            weights = con.weights[:, :64, :].detach().cpu().numpy()
-            np.save(f'weights{i}.npy', weights)
+        self.model = PCFormer(
+            hidden_channels=emb_dim, num_layers=num_layer, num_heads=num_heads,
+            solver=solver, K_order=K_order, beta=beta, theta=theta,
+            dropout=dropout, use_bn=use_bn, use_residual=use_residual
+        )
 
-    # rewiring as augmentation
-    def loss_compute(self, d, criterion, args):
-        logits = self(d.x, d.edge_index, d.batch)[d.train_idx]
-        y = d.y[d.train_idx]
-        sup_loss = self.sup_loss_calc(y, logits, criterion, args)
-        if args.use_reg:
-            reg_loss_ = []
-            for i in range(args.num_aug_branch):
-                edge_index_i = rewiring(
-                    d.edge_index.clone(), d.batch,
-                    args.modify_ratio, type=args.rewiring_type
-                )
+        self.predictor = torch.nn.Linear(emb_dim, num_tasks)
 
-                logits_i = self(d.x, edge_index_i, d.batch)[d.train_idx]
-                reg_loss_i = self.sup_loss_calc(y, logits_i, criterion, args)
-                reg_loss_.append(reg_loss_i)
+    def forward(self, x, edge_index, edge_attr, batch, block_wise=False):
+        node_feat = self.model(
+            x=x, edge_index=edge_index,
+            batch=batch, edge_attr=edge_attr
+        )
 
-            reg_loss = torch.mean(torch.stack(reg_loss_))
-            print(sup_loss.data, reg_loss.data)
-            loss = sup_loss + args.reg_weight * reg_loss
-        else:
-            loss = sup_loss
-        return loss
+        graph_feat = self.pool(node_feat, batch)
+        return self.predictor(graph_feat)
