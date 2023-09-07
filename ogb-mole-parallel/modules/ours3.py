@@ -163,8 +163,7 @@ def prepare_data_inverse(
 
     num_edge, device = edge_index.shape[1], x.device
     (row, col), N, D = edge_index, x.shape[0], x.shape[-1]
-    values = edge_weight if edge_weight is not None\
-        else torch.ones(num_edge).to(device)
+    values = torch.ones(num_edge).to(device)
 
     node_mask, max_node = make_batch_mask(n_nodes, device)
     batch_size, batch = len(n_nodes), make_batch(n_nodes, device)
@@ -205,16 +204,16 @@ def prepare_data_inverse(
     attention_num = qk_pad + ones_block
     attention_normalizer = attention_num.sum(dim=2, keepdim=True)
     # [B, M, M, H]
-    S = attention_num / attention_normalizer
+    S = attention_num / (attention_normalizer + 1e-8)
 
     A_prime = (1 - beta) * S + beta * adj_t.unsqueeze(dim=-1)  # [B, M, M, H]
     identy = torch.eye(max_node).reshape(1, max_node, -1, 1).to(device)
     L = -A_prime + (1 + theta) * identy
 
-    x_batch = torch.zeros(batch_size, max_node, x.shape[-1]).to(devive)
+    x_batch = torch.zeros(batch_size, max_node, x.shape[-1]).to(device)
     x_batch[node_mask] = x
 
-    return L_h, x_batch, node_mask, message_edge
+    return L, x_batch, node_mask, message_edge
 
 
 class GloAttnConv(nn.Module):
@@ -277,8 +276,8 @@ class GloAttnConv(nn.Module):
             x_ = []
             for h in range(self.num_heads):
                 L_h = L[:, :, :, h]
-                x_h = torch.linalg.solve(L_h, x)  # [B, M, D]
-                x_.append((x_h + e_message)[node_mask])  # [N, D]
+                x_h = torch.linalg.solve(L_h, x_batch)  # [B, M, D]
+                x_.append(x_h[node_mask] + e_message)  # [N, D]
             x = torch.cat(x_, dim=1)  # [N, H * D]
         else:
             raise NotImplementedError

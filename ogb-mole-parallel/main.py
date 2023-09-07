@@ -257,11 +257,11 @@ def main():
             pooling='mean', num_heads=args.num_heads, kernel=args.kernel, alpha=args.alpha,
             dropout=args.dropout, use_bn=args.use_bn, use_residual=args.use_residual, K_order=args.K_order
         ).to(device)
-    elif: args.gnn_type == 'F3':
+    elif args.gnn_type == 'F3':
         model = F3(
             emb_dim=args.emb_dim, num_layer=args.num_layer, num_tasks=dataset.num_tasks, 
             num_heads=args.num_heads, solver=args.solver, K_order=args.K_order, 
-            beta=args.beta, dropout=args.dropout, use_bn=args.use_bn, use_residual=args.usb_residual,
+            beta=args.beta, dropout=args.dropout, use_bn=args.use_bn, use_residual=args.use_residual,
             pooling='mean', theta=args.theta
         ).to(device)
     else:

@@ -194,16 +194,16 @@ def prepare_data_inverse(
     attention_num = qk_pad + ones_block
     attention_normalizer = attention_num.sum(dim=2, keepdim=True)
     # [B, M, M, H]
-    S = attention_num / attention_normalizer
+    S = attention_num / (attention_normalizer + 1e-8)
 
     A_prime = (1 - beta) * S + beta * adj_t.unsqueeze(dim=-1)  # [B, M, M, H]
     identy = torch.eye(max_node).reshape(1, max_node, -1, 1).to(device)
     L = -A_prime + (1 + theta) * identy
 
-    x_batch = torch.zeros(batch_size, max_node, x.shape[-1]).to(devive)
+    x_batch = torch.zeros(batch_size, max_node, x.shape[-1]).to(device)
     x_batch[node_mask] = x
 
-    return L_h, x_batch, node_mask
+    return L, x_batch, node_mask
 
 
 class GloAttnConv(nn.Module):
@@ -263,7 +263,7 @@ class GloAttnConv(nn.Module):
             x_ = []
             for h in range(self.num_heads):
                 L_h = L[:, :, :, h]
-                x_h = torch.linalg.solve(L_h, x)  # [B, M, D]
+                x_h = torch.linalg.solve(L_h, x_batch)  # [B, M, D]
                 x_ .append(x_h[node_mask])  # [N, D]
             x = torch.cat(x_, dim=1)  # [N, H * D]
         else:
