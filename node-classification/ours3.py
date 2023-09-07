@@ -1,12 +1,7 @@
 import torch.nn as nn
 import torch
-import math
 import numpy as np
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
-from torch_geometric.utils import erdos_renyi_graph, remove_self_loops, add_self_loops, degree, add_remaining_self_loops, negative_sampling
-from torch_geometric.nn import GCNConv
-from data_utils import sys_normalized_adjacency, sparse_mx_to_torch_sparse_tensor
 from torch_sparse import SparseTensor, matmul
 import torch_scatter
 
@@ -86,27 +81,22 @@ def batch_repeat(inputs, n_col, n_nodes):
     return torch.cat(x_list, dim=0) # [N, H, n_col]
 
 
-def gcn_conv(x, edge_index, edge_weight=None):
-    N, H = x.shape[0], x.shape[1]
-    row, col = edge_index
-    if edge_weight is None:
-        value = torch.ones(edge_index.shape[1], dtype=torch.float).to(x.device)
-    else:
-        value = edge_weight
-    adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(N, N))
-
-    deg = adj_t.sum(dim=1).to(torch.float)
-    deg_inv_sqrt = deg.pow(-0.5)
-    deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-    adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
-
+def gcn_conv(x, adj_t):
+    '''
+    x: [N, H, D]
+    '''
     x_ = []
-    for h in range(H):
+    for h in range(x.shape[1]):
         x_h = x[:, h] # [N, D]
         x_.append(adj_t @ x_h)
     return torch.stack(x_, dim=1) # [N, H, D]
 
-def fast_attn_conv(qs, ks, vs, n_nodes=None, block_wise=False):
+def attn_conv(qs, ks, vs, n_nodes=None, block_wise=False):
+    '''
+    qs: [N, H, D]
+    ks: [N, H, D]
+    vs: [N, H, D]
+    '''
     N = qs.shape[0]
 
     if block_wise:
@@ -115,58 +105,63 @@ def fast_attn_conv(qs, ks, vs, n_nodes=None, block_wise=False):
         k_block = to_block(ks, n_nodes)  # (N, H, B*D)
         v_block = to_block(vs, n_nodes)  # (N, H, B*D)
         kvs = torch.einsum("lhm,lhd->hmd", k_block, v_block)  # [H, B*D, B*D]
-        attention_num = torch.einsum("nhm,hmd->nhd", q_block, kvs)  # (N, H, B*D)
-        attention_num = unpack_block(attention_num, qs.shape[2], n_nodes)  # (N, H, D)
+        qkvs = torch.einsum("nhm,hmd->nhd", q_block, kvs)  # (N, H, B*D)
+        qkvs = unpack_block(qkvs, qs.shape[2], n_nodes)  # (N, H, D)
 
         vs_sum = v_block.sum(dim=0)  # (H, B*D)
         vs_sum = batch_repeat(vs_sum, vs.shape[2], n_nodes)  # (N, H, D)
-        attention_num += vs_sum  # (N, H, D)
+        attn_conv_num = qkvs + vs_sum  # (N, H, D)
 
         # denominator
         all_ones = torch.ones([ks.shape[0], qs.shape[1]]).to(ks.device).unsqueeze(2)  # [N, H, 1]
         one_block = to_block(all_ones, n_nodes)  # [N, H, B]
         ks_sum = torch.einsum("lhm,lhb->hmb", k_block, one_block)  # [H, B*D, B]
-        attention_normalizer = torch.einsum("nhm,hmb->nhb", q_block, ks_sum)  # [N, H, B]
+        qks_sum = torch.einsum("nhm,hmb->nhb", q_block, ks_sum)  # [N, H, B]
 
-        attention_normalizer = unpack_block(attention_normalizer, 1, n_nodes)  # (N, H, 1)
-        attention_normalizer += batch_repeat(n_nodes.repeat(qs.shape[1], 1), 1, n_nodes)  # (N, H, 1)
+        qks_sum = unpack_block(qks_sum, 1, n_nodes)  # (N, H, 1)
+        attn_conv_den = qks_sum + batch_repeat(n_nodes.repeat(qs.shape[1], 1), 1, n_nodes)  # (N, H, 1)
 
     else:
         # numerator
         kvs = torch.einsum("lhm,lhd->hmd", ks, vs)
-        attention_num = torch.einsum("nhm,hmd->nhd", qs, kvs)  # [N, H, D]
+        qkvs = torch.einsum("nhm,hmd->nhd", qs, kvs)  # [N, H, D]
         all_ones = torch.ones([vs.shape[0]]).to(vs.device)
         vs_sum = torch.einsum("l,lhd->hd", all_ones, vs)  # [H, D]
-        attention_num += vs_sum.unsqueeze(0).repeat(vs.shape[0], 1, 1)  # [N, H, D]
+        attn_conv_num = qkvs + vs_sum.unsqueeze(0).repeat(vs.shape[0], 1, 1)  # [N, H, D]
 
         # denominator
         all_ones = torch.ones([ks.shape[0]]).to(ks.device)  # [N]
         ks_sum = torch.einsum("lhm,l->hm", ks, all_ones)
-        attention_normalizer = torch.einsum("nhm,hm->nh", qs, ks_sum)  # [N, H]
+        qks_sum = torch.einsum("nhm,hm->nh", qs, ks_sum)  # [N, H]
 
         # attentive aggregated results
-        attention_normalizer = torch.unsqueeze(attention_normalizer, len(attention_normalizer.shape))  # [N, H, 1]
-        attention_normalizer += torch.ones_like(attention_normalizer) * N
+        qks_sum = torch.unsqueeze(qks_sum, len(qks_sum.shape))  # [N, H, 1]
+        attn_conv_den = qks_sum + torch.ones_like(qks_sum) * N
 
-    return attention_num / attention_normalizer  # [N, H, D]
+    return attn_conv_num / attn_conv_den  # [N, H, D]
 
-def norm_adj_comp(x, edge_index, edge_weight=None):
-    N, H = x.shape[0], x.shape[1]
+def norm_adj_comp(num_nodes, edge_index, edge_weight=None):
     row, col = edge_index
     if edge_weight is None:
-        value = torch.ones(edge_index.shape[1], dtype=torch.float).to(x.device)
+        value = torch.ones(edge_index.shape[1], dtype=torch.float).to(edge_index.device)
     else:
         value = edge_weight
-    adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(N, N))
+    adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(num_nodes, num_nodes))
 
     deg = adj_t.sum(dim=1).to(torch.float)
-    deg_inv_sqrt = deg.pow(-0.5)
+    # deg_inv_sqrt = deg.pow(-0.5)
+    # deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+    # adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
+    deg_inv_sqrt = deg.pow(-1.0)
     deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-    adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
-    return adj_t.to_dense()
+    adj_t = deg_inv_sqrt.view(-1, 1) * adj_t
+    return adj_t
 
 def attn_comp(qs, ks, n_nodes=None, block_wise=False):
-
+    '''
+    qs: [N, H, D]
+    ks: [N, H, D]
+    '''
     if block_wise:
         q_block = to_block(qs, n_nodes)  # (N, H, B*D)
         k_block = to_block(ks, n_nodes)  # (N, H, B*D)
@@ -176,33 +171,27 @@ def attn_comp(qs, ks, n_nodes=None, block_wise=False):
         for n in n_nodes:
             ones_block[cnt:cnt + n, cnt:cnt + n, :] = 1.0
             cnt += n
-        attention_num = qks + ones_block  # (N, N, H)
-        attention_normalizer = attention_num.sum(dim=1, keepdim=True) # [N, 1, H]
+        attn_num = qks + ones_block  # (N, N, H)
+        attn_den = attn_num.sum(dim=1, keepdim=True) # [N, 1, H]
 
     else:
         qks = torch.einsum("nhd,lhd->nlh", qs, ks)  # [N, N, H]
-        attention_num = qks + torch.ones_like(qks)  # (N, N, H)
-        attention_normalizer = attention_num.sum(dim=1, keepdim=True)  # [N, 1, H]
+        attn_num = qks + torch.ones_like(qks)  # (N, N, H)
+        attn_den = attn_num.sum(dim=1, keepdim=True)  # [N, 1, H]
 
-    return attention_num / attention_normalizer  # [N, N, H]
+    return attn_num / attn_den  # [N, N, H]
 
 class GloAttnConv(nn.Module):
     '''
     one global attention layer
+    implement a solver for approximating the closed-form solution of diffusion PDE
+    when solver is series: use series expansion for approximation
+    when solver is inverse: use Chebyshev technique for approximation
     '''
-    def __init__(self, in_channels,
-               out_channels,
-               K_order=4,
-               num_heads=1,
-               beta=0.5,
-               theta=0.,
-               solver='series'):
+    def __init__(self, in_channels, out_channels, num_heads=1, beta=0.5, solver='series', K_order=4, theta=0.):
         super(GloAttnConv, self).__init__()
         self.Wk = nn.Linear(in_channels, in_channels * num_heads)
         self.Wq = nn.Linear(in_channels, in_channels * num_heads)
-        # self.Wo = nn.ModuleList()
-        # for h in range(num_heads):
-        #     self.Wo.append(nn.Linear(in_channels, out_channels))
         self.Wo = nn.Linear(in_channels * num_heads, out_channels)
 
         self.out_channels = out_channels
@@ -217,8 +206,6 @@ class GloAttnConv(nn.Module):
         self.Wk.reset_parameters()
         self.Wq.reset_parameters()
         self.Wo.reset_parameters()
-        # for fc in self.Wo:
-        #     fc.reset_parameters()
 
     def forward(self, x, edge_index, edge_weight=None, n_nodes=None, block_wise=False):
         query = self.Wq(x).reshape(-1, self.num_heads, self.in_channels)
@@ -226,22 +213,23 @@ class GloAttnConv(nn.Module):
         qs = query / torch.norm(query, p=2, dim=2, keepdim=True)  # (N, H, D)
         ks = key / torch.norm(key, p=2, dim=2, keepdim=True)  # (N, H, D)
 
+        adj_t = norm_adj_comp(x.shape[0], edge_index, edge_weight)  # [N, N] sparse matrix
         if self.solver == 'series':
             x = x.unsqueeze(1).repeat(1, self.num_heads, 1)  # [N, H, D]
             x_ = [x]
             for i in range(self.K_order):
-                gcn_i = gcn_conv(x_[-1], edge_index, edge_weight)
-                attn_i = fast_attn_conv(qs, ks, x_[-1], n_nodes, block_wise)
+                gcn_i = gcn_conv(x_[-1], adj_t)
+                attn_i = attn_conv(qs, ks, x_[-1], n_nodes, block_wise)
                 x_i = self.beta * gcn_i + (1 - self.beta) * attn_i
                 x_.append(x_i)
             x = torch.stack(x_, dim=-1).sum(-1) # [N, H, D, K+1] -> [N, H, D]
             x = x.reshape(-1, self.num_heads * self.in_channels) # [N, H*D]
         elif self.solver == 'inverse':
             S = attn_comp(qs, ks, n_nodes, block_wise) # [N, N, H]
-            A_tilde = norm_adj_comp(x, edge_index, edge_weight) # [N, N]
+            A = adj_t.to_dense() # [N, N]
             x_ = []
             for h in range(self.num_heads):
-                A_h = (1 - self.beta) * S[:, :, h] + self.beta * A_tilde # [N, N]
+                A_h = (1 - self.beta) * S[:, :, h] + self.beta * A # [N, N]
                 L_h = (1 + self.theta) * torch.eye(x.shape[0]).to(A_h.device) - A_h
                 x_h = torch.linalg.solve(L_h, x) # [N, D]
                 x_ += [x_h]

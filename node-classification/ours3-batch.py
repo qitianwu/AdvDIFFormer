@@ -82,13 +82,13 @@ def gcn_conv(xs, adj_t):
         x_.append(adj_t @ x_h)
     return torch.stack(x_, dim=1) # [N, H, D]
 
-def norm_adj(num_nodes, edge_index, edge_weight=None):
+def norm_adj_comp(num_nodes, edge_index, edge_weight=None):
     '''
     compute A_tilde for a batch of graphs stored as a diagonal-block A [N_total, N_total]
     '''
     row, col = edge_index
     if edge_weight is None:
-        value = torch.ones(edge_index.shape[1], dtype=torch.float).to(x.device)
+        value = torch.ones(edge_index.shape[1], dtype=torch.float).to(edge_index.device)
     else:
         value = edge_weight
     adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(num_nodes, num_nodes))
@@ -138,7 +138,7 @@ class GloAttnConv(nn.Module):
         qs = query / torch.norm(query, p=2, dim=2, keepdim=True)  # (N_total, H, D)
         ks = key / torch.norm(key, p=2, dim=2, keepdim=True)  # (N_total, H, D)
 
-        adj_t = norm_adj(x.shape[0], edge_index, edge_weight)  # [N_total, N_total] sparse matrix
+        adj_t = norm_adj_comp(x.shape[0], edge_index, edge_weight)  # [N_total, N_total] sparse matrix
         xs = x.unsqueeze(1).repeat(1, self.num_heads, 1)  # [N_total, H, D]
         qs_batch = block_to_batch(qs, batch)  # [B, N, H, D], N for max_num_nodes
         ks_batch = block_to_batch(ks, batch)  # [B, N, H, D]
