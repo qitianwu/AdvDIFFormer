@@ -300,9 +300,13 @@ for x in range(10):
 
     res1 = full_attention_conv(x, y, z, 'simple', N_nodes, True)
     res2 = full_attention_conv_v1(x, y, z, 'simple', N_nodes, True)
+    res3 = full_attention_conv(x, y, z, 'simple', N_nodes, False)
 
     if not torch.allclose(res1, res2, atol=1e-5):
         print(res1, '\n', res2)
+
+    if not torch.allclose(res1, res3, atol=1e-5):
+        print('[INFO] blok_wise and unblock_wise result different')
 
 
     aa, res1 = attn_comp(x, y, N_nodes, True)
