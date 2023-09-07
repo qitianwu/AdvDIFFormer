@@ -4,9 +4,7 @@ import math
 import numpy as np
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
-from torch_geometric.utils import erdos_renyi_graph, remove_self_loops, add_self_loops, degree, add_remaining_self_loops, negative_sampling
 from torch_geometric.nn import GCNConv
-from data_utils import sys_normalized_adjacency, sparse_mx_to_torch_sparse_tensor
 from torch_sparse import SparseTensor, matmul
 import torch_scatter
 
@@ -192,8 +190,14 @@ def prepare_data_inverse(
     # [B, M, M, H]
     S = attention_num / attention_normalizer
 
-    A_h = (1 - beta) * S + beta * adj_t.unsqueeze(dim=-1)  # [B, M, M, H]
-    
+    A_prime = (1 - beta) * S + beta * adj_t.unsqueeze(dim=-1)  # [B, M, M, H]
+    identy = torch.eye(max_node).reshape(1, max_node, -1, 1).to(device)
+    L = -A_prime + (1 + theta) * identy
+
+    x_batch = torch.zeros(batch_size, max_node, x.shape[-1]).to(devive)
+    x_batch[node_mask] = x
+
+    return L_h, x_batch, node_mask
 
 
 class GloAttnConv(nn.Module):
@@ -226,7 +230,7 @@ class GloAttnConv(nn.Module):
         self.Wq.reset_parameters()
         self.Wo.reset_parameters()
 
-    def forward(self, x, edge_index, edge_weight=None, n_nodes=None):
+    def forward(self, x, edge_index, n_nodes, edge_weight=None):
         query = self.Wq(x).reshape(-1, self.num_heads, self.in_channels)
         key = self.Wk(x).reshape(-1, self.num_heads, self.in_channels)
 
@@ -246,19 +250,16 @@ class GloAttnConv(nn.Module):
             x = torch.stack(x_, dim=-1).sum(-1)  # [N, H, D, K+1] -> [N, H, D]
             x = x.reshape(-1, self.num_heads * self.in_channels)  # [N, H*D]
         elif self.solver == 'inverse':
-            S = attn_comp(qs, ks, n_nodes)  # [B, N, N, H]
-            A_tilde = norm_adj_comp(
-                x, edge_index, n_nodes, edge_weight)  # [B, N, N]
-            x_batch =
+            L, x_batch, node_mask = prepare_data_inverse(
+                qs=qs, ks=ks, x=x, n_nodes=n_nodes, edge_index=edge_index,
+                beta=self.beta, theta=self.theta, edge_weight=edge_weight
+            )
             x_ = []
             for h in range(self.num_heads):
-                A_h = (1 - self.beta) * S[:, :, h] + \
-                    self.beta * A_tilde  # [N, N]
-                L_h = (1 + self.theta) * \
-                    torch.eye(x.shape[0]).to(A_h.device) - A_h
-                x_h = torch.linalg.solve(L_h, x)  # [N, D]
-                x_ += [x_h]
-            x = torch.cat(x_, dim=1)  # [N, H*D]
+                L_h = L[:, :, :, h]
+                x_h = torch.linalg.solve(L_h, x)  # [B, M, D]
+                x_ .append(x_h[node_mask])  # [N, D]
+            x = torch.cat(x_, dim=1)  # [N, H * D]
         else:
             raise NotImplementedError
 
@@ -275,8 +276,11 @@ class PCFormer(nn.Module):
     return y_hat predicted logits [N, C]
     '''
 
-    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=1, num_heads=1, solver='series',
-                 K_order=3, beta=0.5, theta=0., dropout=0.5, use_bn=True, use_residual=True):
+    def __init__(
+        self, in_channels, hidden_channels, out_channels, num_layers=1,
+        num_heads=1, solver='series', K_order=3, beta=0.5, theta=0.,
+        dropout=0.5, use_bn=True, use_residual=True
+    ):
         super(PCFormer, self).__init__()
 
         self.fcs = nn.ModuleList()
@@ -285,8 +289,10 @@ class PCFormer(nn.Module):
         self.bns.append(nn.BatchNorm1d(hidden_channels))
         self.convs = nn.ModuleList()
         for i in range(num_layers):
-            self.convs.append(
-                GloAttnConv(hidden_channels, hidden_channels, K_order=K_order, num_heads=num_heads, beta=beta, theta=theta, solver=solver))
+            self.convs.append(GloAttnConv(
+                hidden_channels, hidden_channels, K_order=K_order,
+                num_heads=num_heads, beta=beta, theta=theta, solver=solver
+            ))
             self.bns.append(nn.BatchNorm1d(hidden_channels))
         self.fcs.append(nn.Linear(hidden_channels, out_channels))
 
@@ -305,14 +311,8 @@ class PCFormer(nn.Module):
         for fc in self.fcs:
             fc.reset_parameters()
 
-    def forward(self, x, edge_index, batch=None, edge_weight=None, block_wise=False):
-
-        if block_wise:
-            n_nodes = torch_scatter.scatter(
-                torch.ones_like(batch), batch)  # [B]
-        else:
-            n_nodes = None
-
+    def forward(self, x, edge_index, batch=None, edge_weight=None):
+        n_nodes = torch_scatter.scatter(torch.ones_like(batch), batch)
         layer_ = []
 
         # input MLP layer
@@ -361,22 +361,21 @@ class PCFormer(nn.Module):
 
     # rewiring as augmentation
     def loss_compute(self, d, criterion, args):
-        logits = self.forward(d.x, d.edge_index, d.batch,
-                              block_wise=args.use_block)[d.train_idx]
+        logits = self(d.x, d.edge_index, d.batch)[d.train_idx]
         y = d.y[d.train_idx]
         sup_loss = self.sup_loss_calc(y, logits, criterion, args)
         if args.use_reg:
             reg_loss_ = []
             for i in range(args.num_aug_branch):
-                edge_index_i = rewiring(d.edge_index.clone(
-                ), d.batch, args.modify_ratio, type=args.rewiring_type)
+                edge_index_i = rewiring(
+                    d.edge_index.clone(), d.batch,
+                    args.modify_ratio, type=args.rewiring_type
+                )
 
-                logits_i = self.forward(d.x, edge_index_i, d.batch, block_wise=args.use_block)[
-                    d.train_idx]
+                logits_i = self(d.x, edge_index_i, d.batch)[d.train_idx]
                 reg_loss_i = self.sup_loss_calc(y, logits_i, criterion, args)
                 reg_loss_.append(reg_loss_i)
-                # reg_loss_.append(torch.relu(reg_loss_i - sup_loss) ** 2)
-            # loss_reg = torch.mean(torch.stack(reg_loss_))
+
             reg_loss = torch.mean(torch.stack(reg_loss_))
             print(sup_loss.data, reg_loss.data)
             loss = sup_loss + args.reg_weight * reg_loss
