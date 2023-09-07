@@ -157,7 +157,7 @@ def norm_adj_comp(num_nodes, edge_index, edge_weight=None):
     adj_t = deg_inv_sqrt.view(-1, 1) * adj_t
     return adj_t
 
-def attn_comp(qs, ks, n_nodes=None, block_wise=False):
+def Laplacian_comp(qs, ks, A, beta, theta, n_nodes=None, block_wise=False):
     '''
     qs: [N, H, D]
     ks: [N, H, D]
@@ -179,7 +179,12 @@ def attn_comp(qs, ks, n_nodes=None, block_wise=False):
         attn_num = qks + torch.ones_like(qks)  # (N, N, H)
         attn_den = attn_num.sum(dim=1, keepdim=True)  # [N, 1, H]
 
-    return attn_num / attn_den  # [N, N, H]
+    S = attn_num / attn_den  # [N, N, H]
+
+    A_prime = (1 - beta) * S + beta * A.unsqueeze(-1).repeat(1, 1, qs.shape[1]) # [N, N, H]
+    L = (1 + theta) * torch.eye(qs.shape[0]).to(qs.device).unsqueeze(-1).repeat(1, 1, qs.shape[1]) - A_prime
+
+    return L
 
 class GloAttnConv(nn.Module):
     '''
@@ -225,12 +230,10 @@ class GloAttnConv(nn.Module):
             x = torch.stack(x_, dim=-1).sum(-1) # [N, H, D, K+1] -> [N, H, D]
             x = x.reshape(-1, self.num_heads * self.in_channels) # [N, H*D]
         elif self.solver == 'inverse':
-            S = attn_comp(qs, ks, n_nodes, block_wise) # [N, N, H]
-            A = adj_t.to_dense() # [N, N]
+            L = Laplacian_comp(qs, ks, adj_t.to_dense(), self.beta, self.theta, n_nodes, block_wise) # [N, N, H]
             x_ = []
             for h in range(self.num_heads):
-                A_h = (1 - self.beta) * S[:, :, h] + self.beta * A # [N, N]
-                L_h = (1 + self.theta) * torch.eye(x.shape[0]).to(A_h.device) - A_h
+                L_h = L[:, :, h] # [N, N]
                 x_h = torch.linalg.solve(L_h, x) # [N, D]
                 x_ += [x_h]
             x = torch.cat(x_, dim=1) # [N, H*D]
