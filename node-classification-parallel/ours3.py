@@ -91,28 +91,7 @@ def gcn_conv(x, edge_index, edge_weight=None):
     return new_feat
 
 
-# def gcn_conv(x, edge_index, edge_weight=None):
-#     N, H = x.shape[0], x.shape[1]
-#     row, col = edge_index
-#     if edge_weight is None:
-#         value = torch.ones(edge_index.shape[1], dtype=torch.float).to(x.device)
-#     else:
-#         value = edge_weight
-#     adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(N, N))
-
-#     deg = adj_t.sum(dim=1).to(torch.float)
-#     deg_inv_sqrt = deg.pow(-0.5)
-#     deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-#     adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
-
-#     x_ = []
-#     for h in range(H):
-#         x_h = x[:, h]  # [N, D]
-#         x_.append(adj_t @ x_h)
-#     return torch.stack(x_, dim=1)  # [N, H, D]
-
-
-def fast_attn_conv(qs, ks, vs):
+def fast_attn_conv(qs, ks, vs, n_nodes):
     '''
     qs: query tensor [N, H, D]
     ks: key tensor [N, H, D]
@@ -139,51 +118,82 @@ def fast_attn_conv(qs, ks, vs):
     v_sum.scatter_add_(dim=0, index=v_idx, src=vs)  # [B, H, D]
 
     numerator = torch.einsum('abcd,adce->abce', qk_pad, v_pad)
-    numerator = numerator[node_mask] + v_sum[batch] # [N, H, D]
+    numerator = numerator[node_mask] + v_sum[batch]  # [N, H, D]
 
     denominator = qk_pad[node_mask].sum(dim=-1)  # [N, H]
     denominator += torch.index_select(
         n_nodes.float(), dim=0, index=batch
     ).unsqueeze(dim=-1)
 
-    attn_output = numerator / denominator.unsqueeze(dim=-1) # [N, H, D]
+    attn_output = numerator / denominator.unsqueeze(dim=-1)  # [N, H, D]
     return attn_output
 
 
-def norm_adj_comp(x, edge_index, edge_weight=None):
-    N, H = x.shape[0], x.shape[1]
-    row, col = edge_index
-    if edge_weight is None:
-        value = torch.ones(edge_index.shape[1], dtype=torch.float).to(x.device)
-    else:
-        value = edge_weight
-    adj_t = SparseTensor(row=col, col=row, value=value, sparse_sizes=(N, N))
-
-    deg = adj_t.sum(dim=1).to(torch.float)
-    deg_inv_sqrt = deg.pow(-0.5)
-    deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-    adj_t = deg_inv_sqrt.view(-1, 1) * adj_t * deg_inv_sqrt.view(1, -1)
-    return adj_t.to_dense()
+def make_diag_mask(node_mask, max_node, BS):
+    ones_block = torch.zeros((BS, max_node, max_node)).to(node_mask.device)
+    ones_block[node_mask] = 1
+    ones_block = ones_block.transpose(1, 2)
+    ones_block[~node_mask] = 0
+    ones_block = ones_block.transpose(1, 2)
+    return ones_block.bool()
 
 
-def attn_comp(qs, ks, n_nodes=None, block_wise=False):
-    device = qs.device
+def make_ptr_from_batch(batch, batch_size=None):
+    if batch_size is None:
+        batch_size = batch.max().item() + 1
+    ptr = torch.zeros(batch_size).to(batch)
+    ptr.scatter_add_(dim=0, src=torch.ones_like(batch), index=batch)
+    ptr = torch.cat([torch.Tensor([0]).to(batch.device), ptr], dim=0)
+    ptr = torch.cumsum(ptr, dim=0).long()
+    return ptr
+
+
+def prepare_data_inverse(
+    qs, ks, x, n_nodes, edge_index, beta, theta,
+    edge_weight=None
+):
+    # compute adj_t for gcn
+
+    num_edge, device = edge_index.shape[1], x.device
+    (row, col), N, D = edge_index, x.shape[0], x.shape[-1]
+    values = edge_weight if edge_weight is not None\
+        else torch.ones(num_edge).to(device)
+
     node_mask, max_node = make_batch_mask(n_nodes, device)
     batch_size, batch = len(n_nodes), make_batch(n_nodes, device)
+    ptr = make_ptr_from_batch(batch)
+
+    deg = torch.zeros(N).to(device)
+    deg.scatter_add_(dim=0, index=row, src=values)
+    deg_inv = torch.zeros_like(deg)
+    deg_inv[deg > 0] = 1. / deg[deg > 0]
+    adj_t_value = deg_inv[row] * values
+
+    adj_t = torch.zeros(batch_size, max_node, max_node).to(device)
+
+    # two edges in the same batch
+    e_batch = batch[row]
+    adj_t[e_batch, row - ptr[e_batch], col - ptr[e_batch]] = adj_t_value
+
+    # compute attention
+
     q_pad = to_pad(qs, node_mask, max_node, batch_size)  # [B, M, H, D]
     k_pad = to_pad(ks, node_mask, max_node, batch_size)  # [B, M, H, D]
     qk_pad = torch.einsum('abcd,aecd->abce', q_pad, k_pad)
     # [B, M, H, M]
+    qk_pad = qk_pad.transpose(2, 3)
+
+    diag_mask = make_diag_mask(node_mask, max_node, batch_size)
+    ones_block = torch.zeros_like(qk_pad)
+    ones_block[diag_mask] = 1
+
+    attention_num = qk_pad + ones_block
+    attention_normalizer = attention_num.sum(dim=2, keepdim=True)
+    # [B, M, M, H]
+    S = attention_num / attention_normalizer
+
+    A_h = (1 - beta) * S + beta * adj_t.unsqueeze(dim=-1)  # [B, M, M, H]
     
-
-    useful_block = []
-    for idx, np in enumerate(n_nodes):
-        useful_block.append(qk_pad[idx, :np, :, :np] + 1)
-
-
-    attention_normalizer = attention_num.sum(dim=1, keepdim=True)  # [N, 1, H]
-
-    return attention_num / attention_normalizer
 
 
 class GloAttnConv(nn.Module):
@@ -215,8 +225,6 @@ class GloAttnConv(nn.Module):
         self.Wk.reset_parameters()
         self.Wq.reset_parameters()
         self.Wo.reset_parameters()
-        # for fc in self.Wo:
-        #     fc.reset_parameters()
 
     def forward(self, x, edge_index, edge_weight=None, n_nodes=None):
         query = self.Wq(x).reshape(-1, self.num_heads, self.in_channels)
@@ -235,11 +243,13 @@ class GloAttnConv(nn.Module):
                 attn_i = fast_attn_conv(qs, ks, x_[-1], n_nodes)
                 x_i = self.beta * gcn_i + (1 - self.beta) * attn_i
                 x_.append(x_i)
-            x = torch.stack(x_, dim=-1).sum(-1) # [N, H, D, K+1] -> [N, H, D]
-            x = x.reshape(-1, self.num_heads * self.in_channels) # [N, H*D]
+            x = torch.stack(x_, dim=-1).sum(-1)  # [N, H, D, K+1] -> [N, H, D]
+            x = x.reshape(-1, self.num_heads * self.in_channels)  # [N, H*D]
         elif self.solver == 'inverse':
-            S = attn_comp(qs, ks, n_nodes, block_wise)  # [N, N, H]
-            A_tilde = norm_adj_comp(x, edge_index, edge_weight)  # [N, N]
+            S = attn_comp(qs, ks, n_nodes)  # [B, N, N, H]
+            A_tilde = norm_adj_comp(
+                x, edge_index, n_nodes, edge_weight)  # [B, N, N]
+            x_batch =
             x_ = []
             for h in range(self.num_heads):
                 A_h = (1 - self.beta) * S[:, :, h] + \
