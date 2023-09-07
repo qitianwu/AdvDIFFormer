@@ -169,25 +169,50 @@ def full_attention_conv_v1(
             q_pad = to_pad(qs, node_mask, max_node, batch_size)  # [B, M, H, D]
             k_pad = to_pad(ks, node_mask, max_node, batch_size)  # [B, M, H, D]
             v_pad = to_pad(vs, node_mask, max_node, batch_size)  # [B, M, H, D]
-            qk_pad = torch.einsum('abcd,aecd->abce', q_pad, k_pad)
-            # [B, M, H, M]
 
-            n_heads, v_dim = vs.shape[-2:]
+            kv_pad = torch.einsum('abcd,abce->adce', k_pad, v_pad) 
+            # [B, D, H, D]
+
+            (n_heads, v_dim), k_dim = vs.shape[-2:], ks.shape[-1]
             v_sum = torch.zeros((batch_size, n_heads, v_dim)).to(device)
             v_idx = batch.reshape(-1, 1, 1).repeat(1, n_heads, v_dim)
             v_sum.scatter_add_(dim=0, index=v_idx, src=vs)  # [B, H, D]
 
-            numerator = torch.einsum('abcd,adce->abce', qk_pad, v_pad)
-            numerator = numerator[node_mask] + \
-                torch.index_select(v_sum, dim=0, index=batch)
-            # [N, H, D]
+            numerator = torch.einsum('abcd,adce->abce', q_pad, kv_pad)
+            numerator = numerator[node_mask] + v_sum[batch]
 
-            denominator = qk_pad[node_mask].sum(dim=-1)  # [N, H]
-            denominator += torch.index_select(
+
+            k_sum = torch.zeros((batch_size, n_heads, k_dim)).to(device)
+            k_sum.scatter_add_(dim=0, index=v_idx, src=ks) #[B, H, D]
+            denominator = torch.einsum('abcd,acd->abc', q_pad, k_sum)
+            denominator = denominator[node_mask] + torch.index_select(
                 n_nodes.float(), dim=0, index=batch
             ).unsqueeze(dim=-1)
 
             attn_output = numerator / denominator.unsqueeze(dim=-1) # [N, H, D]
+
+
+
+
+            # qk_pad = torch.einsum('abcd,aecd->abce', q_pad, k_pad)
+            # # [B, M, H, M]
+
+            # n_heads, v_dim = vs.shape[-2:]
+            # v_sum = torch.zeros((batch_size, n_heads, v_dim)).to(device)
+            # v_idx = batch.reshape(-1, 1, 1).repeat(1, n_heads, v_dim)
+            # v_sum.scatter_add_(dim=0, index=v_idx, src=vs)  # [B, H, D]
+
+            # numerator = torch.einsum('abcd,adce->abce', qk_pad, v_pad)
+            # numerator = numerator[node_mask] + \
+            #     torch.index_select(v_sum, dim=0, index=batch)
+            # # [N, H, D]
+
+            # denominator = qk_pad[node_mask].sum(dim=-1)  # [N, H]
+            # denominator += torch.index_select(
+            #     n_nodes.float(), dim=0, index=batch
+            # ).unsqueeze(dim=-1)
+
+            # attn_output = numerator / denominator.unsqueeze(dim=-1) # [N, H, D]
 
         else:
             # normalize input
@@ -286,9 +311,9 @@ def attn_comp_old(qs, ks, n_nodes=None, block_wise=False):
 
 for x in range(10):
     dim = random.randint(5, 50)
-    BS = random.randint(2, 3)
-    N_heads = random.randint(2, 3)
-    N_nodes = [random.randint(4, 5) for _ in range(BS)]
+    BS = random.randint(5, 50)
+    N_heads = random.randint(5, 10)
+    N_nodes = [random.randint(5, 50) for _ in range(BS)]
     sum_nodes = sum(N_nodes)
 
     N_nodes = torch.LongTensor(N_nodes)

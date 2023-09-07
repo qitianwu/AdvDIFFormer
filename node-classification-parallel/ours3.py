@@ -67,11 +67,12 @@ def to_pad(feat, mask, max_node, batch_size):
 def gcn_conv(x, edge_index, edge_weight=None):
     # x: [N_tot, H, D]
     num_edge, device = edge_index.shape[1], x.device
-    (row, col), N, D = edge_index, x.shape[0], x.shape[-1]
+    (row, col), (N, H, D) = edge_index, x.shape
     values = edge_weight if edge_weight is not None\
         else torch.ones(num_edge).to(device)
 
     deg = torch.zeros(N).to(device)
+
     deg.scatter_add_(dim=0, index=row, src=values)
 
     deg_inv_sqrt = torch.zeros_like(deg)
@@ -107,23 +108,27 @@ def fast_attn_conv(qs, ks, vs, n_nodes):
     q_pad = to_pad(qs, node_mask, max_node, batch_size)  # [B, M, H, D]
     k_pad = to_pad(ks, node_mask, max_node, batch_size)  # [B, M, H, D]
     v_pad = to_pad(vs, node_mask, max_node, batch_size)  # [B, M, H, D]
-    qk_pad = torch.einsum('abcd,aecd->abce', q_pad, k_pad)
-    # [B, M, H, M]
 
-    n_heads, v_dim = vs.shape[-2:]
+    kv_pad = torch.einsum('abcd,abce->adce', k_pad, v_pad) 
+    # [B, D, H, D]
+
+    (n_heads, v_dim), k_dim = vs.shape[-2:], ks.shape[-1]
     v_sum = torch.zeros((batch_size, n_heads, v_dim)).to(device)
     v_idx = batch.reshape(-1, 1, 1).repeat(1, n_heads, v_dim)
     v_sum.scatter_add_(dim=0, index=v_idx, src=vs)  # [B, H, D]
 
-    numerator = torch.einsum('abcd,adce->abce', qk_pad, v_pad)
-    numerator = numerator[node_mask] + v_sum[batch]  # [N, H, D]
+    numerator = torch.einsum('abcd,adce->abce', q_pad, kv_pad)
+    numerator = numerator[node_mask] + v_sum[batch]
 
-    denominator = qk_pad[node_mask].sum(dim=-1)  # [N, H]
-    denominator += torch.index_select(
+
+    k_sum = torch.zeros((batch_size, n_heads, k_dim)).to(device)
+    k_sum.scatter_add_(dim=0, index=v_idx, src=ks) #[B, H, D]
+    denominator = torch.einsum('abcd,acd->abc', q_pad, k_sum)
+    denominator = denominator[node_mask] + torch.index_select(
         n_nodes.float(), dim=0, index=batch
     ).unsqueeze(dim=-1)
 
-    attn_output = numerator / denominator.unsqueeze(dim=-1)  # [N, H, D]
+    attn_output = numerator / denominator.unsqueeze(dim=-1) # [N, H, D]
     return attn_output
 
 
@@ -243,7 +248,7 @@ class GloAttnConv(nn.Module):
             x = x.unsqueeze(1).repeat(1, self.num_heads, 1)  # [N, H, D]
             x_ = [x]
             for i in range(self.K_order):
-                gcn_i = gcn_conv(x_[-1], adj_t)
+                gcn_i = gcn_conv(x_[-1], edge_index, edge_weight)
                 attn_i = fast_attn_conv(qs, ks, x_[-1], n_nodes)
                 x_i = self.beta * gcn_i + (1 - self.beta) * attn_i
                 x_.append(x_i)
@@ -311,7 +316,7 @@ class PCFormer(nn.Module):
         for fc in self.fcs:
             fc.reset_parameters()
 
-    def forward(self, x, edge_index, batch=None, edge_weight=None):
+    def forward(self, x, edge_index, batch, edge_weight=None):
         n_nodes = torch_scatter.scatter(torch.ones_like(batch), batch)
         layer_ = []
 
@@ -326,7 +331,7 @@ class PCFormer(nn.Module):
         layer_.append(x)
 
         for i in range(self.num_layers):
-            x = self.convs[i](x, edge_index, edge_weight, n_nodes, block_wise)
+            x = self.convs[i](x, edge_index, n_nodes, edge_weight)
             if self.residual:
                 x += layer_[i]
             if self.use_bn:
