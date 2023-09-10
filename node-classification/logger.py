@@ -88,6 +88,8 @@ class Logger(object):
             for i in range(ood_size):
                 r = best_result[:, i+4+ood_size]
                 print(f'   Final OOD Test: {r.mean():.2f} ± {r.std():.2f}')
+            r = best_result[:, 4+ood_size:4+2*ood_size].mean(dim=-1)
+            print(f'   Final All OOD Test: {r.mean():.2f} ± {r.std():.2f}')
             return best_result[:, -ood_size-2:]
 
 import os
@@ -104,5 +106,7 @@ def save_result(args, results):
         for i in range(results.size(1)):
             r = results[:, i]
             m += f"{r.mean():.2f} $\pm$ {r.std():.2f} "
+        r = results[:, 2:].mean(dim=-1)
+        m += f"{r.mean():.2f} ± {r.std():.2f} "
         m += "\n"
         write_obj.write(m)

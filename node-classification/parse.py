@@ -159,7 +159,7 @@ def parser_add_main_args(parser):
     parser.add_argument('--rewiring_type', type=str, default='delete', choices=['delete', 'replace'])
     parser.add_argument('--K_order', type=int, default=3, help='order for gcn conv each layer')
     parser.add_argument('--beta', type=float, default=0.5, help='weight for local and global prop')
-    parser.add_argument('--theta', type=float, default=0., help='weight for identity mapping in Laplacian prop')
+    parser.add_argument('--theta', type=float, default=1.0, help='weight for identity mapping in Laplacian prop')
     parser.add_argument('--solver', type=str, default='series', choices=['series', 'inverse'])
 
     # training

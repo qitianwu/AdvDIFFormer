@@ -1,24 +1,43 @@
 datasets=('arxiv' 'twitch')
 dev=0
 
-for a in 0.1 0.3 0.5 0.8
+for a in 0.2 0.5 0.8 1.0
 do
   for b in 1 2 4
     do
-    for c in 1 2 4 8 12
+    for c in 1 2 4
     do
-      for d in 1 2 3
+      for d in 1
       do
-        for e in 32 64 128
+        for e in 1e-4
         do
-          python main.py --dataset twitch --method ours3 --lr 0.0001 --num_layers $d --beta $a \
---hidden_channels $e --num_heads $b --solver series --K_order $c --use_residual \
+          python main.py --dataset twitch --method ours3 --lr $e --num_layers $d --beta $a \
+--hidden_channels 64 --num_heads $b --solver series --K_order $c --theta 1.0 --use_residual \
 --runs 1 --epochs 500 --seed 123 --device 2 --save_result
         done
       done
     done
   done
 done
+
+#for a in 0.2 0.5 0.8 1.0
+#do
+#  for b in 1 2 4
+#    do
+#    for c in 0.0 0.5 1.0 2.0
+#    do
+#      for d in 1
+#      do
+#        for e in 1e-5 1e-4 1e-3
+#        do
+#          python main.py --dataset twitch --method ours3 --lr $e --num_layers $d --beta $a \
+#--hidden_channels 64 --num_heads $b --solver inverse --theta $c --use_residual \
+#--runs 1 --epochs 500 --seed 123 --device 2 --save_result
+#        done
+#      done
+#    done
+#  done
+#done
 
 
 #for a in 0.5

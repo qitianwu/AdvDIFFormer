@@ -88,24 +88,30 @@ python main.py --dataset twitch --method ours3 --lr 1e-4 --weight_decay 0. --num
 
 # new for ours3
 
-python main.py --dataset arxiv --method ours3 --lr 1e-3 --weight_decay 0. --num_layers 1 --beta 0.5 \
---hidden_channels 128 --num_heads 1 --K_order 8 --kernel simple --use_residual --use_bn \
+python main.py --dataset arxiv --method ours3 --lr 1e-3 --weight_decay 0. --num_layers 1 --beta 0.8 \
+--hidden_channels 128 --num_heads 2 --K_order 1 --theta 1.0 --kernel simple --use_residual --use_bn \
 --runs 5 --epochs 500 --seed 123 --device 2
 
+ours3 gcn: 0.001: 128: 1 0.8 2 series 1.0 1
+60.96 $\pm$ nan 54.96 $\pm$ nan 53.59 $\pm$ nan 51.38 $\pm$ nan 49.73 $\pm$ nan 51.57 ± nan
 
 
-python main.py --dataset twitch --method ours3 --lr 1e-4 --weight_decay 0. --num_layers 1 --beta 0.5 \
---hidden_channels 64 --num_heads 2 --K_order 3 --kernel simple --use_residual \
+python main.py --dataset twitch --method ours3 --lr 1e-4 --weight_decay 0. --num_layers 1 --beta 1.0 \
+--hidden_channels 64 --num_heads 2 --solver series --K_order 1 --use_residual \
 --runs 5 --epochs 500 --seed 123 --device 1
 
-ours3 gcn: 0.0001: 64: 2 0.5 1 series 0.0 1
-75.76 $\pm$ nan 63.05 $\pm$ nan 67.15 $\pm$ nan 63.16 $\pm$ nan 66.07 $\pm$ nan 56.31 $\pm$ nan 60.73 $\pm$ nan
+ours3 gcn: 0.0001: 64: 1 1.0 2 series 1.0 1
+75.16 $\pm$ nan 63.39 $\pm$ nan 66.87 $\pm$ nan 63.43 $\pm$ nan 65.80 $\pm$ nan 56.42 $\pm$ nan 60.79 $\pm$ nan 62.66 ± nan
 
-ours3 gcn: 0.0001: 32: 2 0.5 2 series 0.0 1
-75.17 $\pm$ nan 63.57 $\pm$ nan 67.12 $\pm$ nan 63.47 $\pm$ nan 65.83 $\pm$ nan 56.20 $\pm$ nan 60.66 $\pm$ nan
 
-ours3 gcn: 0.0001: 32: 2 0.5 4 series 0.0 1
-75.15 $\pm$ nan 63.56 $\pm$ nan 67.04 $\pm$ nan 63.51 $\pm$ nan 65.94 $\pm$ nan 56.31 $\pm$ nan 60.80 $\pm$ nan
+python main.py --dataset twitch --method ours3 --lr 1e-3 --weight_decay 0. --num_layers 1 --beta 0.8 \
+--hidden_channels 64 --num_heads 2 --solver inverse --theta 0.0 --use_residual \
+--runs 5 --epochs 500 --seed 123 --device 1
 
-ours3 gcn: 0.0001: 32: 2 0.5 4 series 0.0 2
-75.15 $\pm$ nan 63.57 $\pm$ nan 67.07 $\pm$ nan 63.51 $\pm$ nan 65.85 $\pm$ nan 56.28 $\pm$ nan 60.60 $\pm$ nan
+ours3 gcn: 0.001: 64: 1 0.8 2 inverse 0.0 3
+74.94 $\pm$ nan 63.57 $\pm$ nan 66.89 $\pm$ nan 64.26 $\pm$ nan 65.95 $\pm$ nan 56.13 $\pm$ nan 60.46 $\pm$ nan 62.74 ± nan
+
+
+python main.py --dataset twitch --method ours3 --lr 1e-3 --weight_decay 0. --num_layers 1 --beta 0. \
+--hidden_channels 64 --num_heads 2 --solver inverse --theta 0.0 --use_residual \
+--runs 5 --epochs 500 --seed 123 --device 0

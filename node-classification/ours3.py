@@ -181,7 +181,8 @@ def Laplacian_comp(qs, ks, A, beta, theta, n_nodes=None, block_wise=False):
 
     S = attn_num / attn_den  # [N, N, H]
 
-    A_prime = (1 - beta) * S + beta * A.unsqueeze(-1).repeat(1, 1, qs.shape[1]) # [N, N, H]
+    # A_prime = S + beta * A.unsqueeze(-1).repeat(1, 1, qs.shape[1]) # [N, N, H]
+    A_prime = A.unsqueeze(-1).repeat(1, 1, qs.shape[1]) # [N, N, H]
     L = (1 + theta) * torch.eye(qs.shape[0]).to(qs.device).unsqueeze(-1).repeat(1, 1, qs.shape[1]) - A_prime
 
     return L
@@ -197,7 +198,10 @@ class GloAttnConv(nn.Module):
         super(GloAttnConv, self).__init__()
         self.Wk = nn.Linear(in_channels, in_channels * num_heads)
         self.Wq = nn.Linear(in_channels, in_channels * num_heads)
-        self.Wo = nn.Linear(in_channels * num_heads, out_channels)
+        if solver == 'inverse':
+            self.Wo = nn.Linear(in_channels * num_heads, out_channels)
+        else:
+            self.Wo = nn.Linear(in_channels * num_heads * (K_order+1), out_channels)
 
         self.out_channels = out_channels
         self.in_channels = in_channels
@@ -225,10 +229,13 @@ class GloAttnConv(nn.Module):
             for i in range(self.K_order):
                 gcn_i = gcn_conv(x_[-1], adj_t)
                 attn_i = attn_conv(qs, ks, x_[-1], n_nodes, block_wise)
-                x_i = self.beta * gcn_i + (1 - self.beta) * attn_i
+                # x_i = self.beta * gcn_i + attn_i
+                x_i = gcn_i
                 x_.append(x_i)
-            x = torch.stack(x_, dim=-1).sum(-1) # [N, H, D, K+1] -> [N, H, D]
-            x = x.reshape(-1, self.num_heads * self.in_channels) # [N, H*D]
+            # x = torch.stack(x_, dim=-1).sum(-1) # [N, H, D, K+1] -> [N, H, D]
+            x = torch.concat(x_, dim=-1)  # [N, H, D*(K+1)]
+            x = x.reshape(-1, self.num_heads * self.in_channels * (self.K_order+1)) # [N, H*D*(K+1)]
+            x_out = self.Wo(x) / self.num_heads  # [N, D]
         elif self.solver == 'inverse':
             L = Laplacian_comp(qs, ks, adj_t.to_dense(), self.beta, self.theta, n_nodes, block_wise) # [N, N, H]
             x_ = []
@@ -237,10 +244,9 @@ class GloAttnConv(nn.Module):
                 x_h = torch.linalg.solve(L_h, x) # [N, D]
                 x_ += [x_h]
             x = torch.cat(x_, dim=1) # [N, H*D]
+            x_out = self.Wo(x) / self.num_heads  # [N, D]
         else:
             raise NotImplementedError
-
-        x_out = self.Wo(x) / self.num_heads # [N, D]
 
         return x_out
 

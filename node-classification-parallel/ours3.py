@@ -196,9 +196,9 @@ def prepare_data_inverse(
     # [B, M, M, H]
     S = attention_num / (attention_normalizer + 1e-8)
 
-    A_prime = (1 - beta) * S + beta * adj_t.unsqueeze(dim=-1)  # [B, M, M, H]
+    A_prime = S + beta * adj_t.unsqueeze(dim=-1)  # [B, M, M, H]
     identy = torch.eye(max_node).reshape(1, max_node, -1, 1).to(device)
-    L = -A_prime + (1 + theta) * identy
+    L = - A_prime + (1 + theta) * identy
 
     x_batch = torch.zeros(batch_size, max_node, x.shape[-1]).to(device)
     x_batch[node_mask] = x
@@ -218,10 +218,10 @@ class GloAttnConv(nn.Module):
         super(GloAttnConv, self).__init__()
         self.Wk = nn.Linear(in_channels, in_channels * num_heads)
         self.Wq = nn.Linear(in_channels, in_channels * num_heads)
-        # self.Wo = nn.ModuleList()
-        # for h in range(num_heads):
-        #     self.Wo.append(nn.Linear(in_channels, out_channels))
-        self.Wo = nn.Linear(in_channels * num_heads, out_channels)
+        if solver == 'inverse':
+            self.Wo = nn.Linear(in_channels * num_heads, out_channels)
+        else:
+            self.Wo = nn.Linear(in_channels * num_heads * (K_order+1), out_channels)
 
         self.out_channels = out_channels
         self.in_channels = in_channels
@@ -239,9 +239,6 @@ class GloAttnConv(nn.Module):
     def forward(self, x, edge_index, n_nodes, edge_weight=None):
         query = self.Wq(x).reshape(-1, self.num_heads, self.in_channels)
         key = self.Wk(x).reshape(-1, self.num_heads, self.in_channels)
-
-        # for h in range(self.num_heads):
-        # qs, ks = query[:, h], key[:, h]
         qs = query / torch.norm(query, p=2, dim=2, keepdim=True)  # (N, H, D)
         ks = key / torch.norm(key, p=2, dim=2, keepdim=True)  # (N, H, D)
 
@@ -251,10 +248,13 @@ class GloAttnConv(nn.Module):
             for i in range(self.K_order):
                 gcn_i = gcn_conv(x_[-1], edge_index, edge_weight)
                 attn_i = fast_attn_conv(qs, ks, x_[-1], n_nodes)
-                x_i = self.beta * gcn_i + (1 - self.beta) * attn_i
+                x_i = self.beta * gcn_i + attn_i
                 x_.append(x_i)
-            x = torch.stack(x_, dim=-1).sum(-1)  # [N, H, D, K+1] -> [N, H, D]
-            x = x.reshape(-1, self.num_heads * self.in_channels)  # [N, H*D]
+            # x = torch.stack(x_, dim=-1).sum(-1)  # [N, H, D, K+1] -> [N, H, D]
+            # x = x.reshape(-1, self.num_heads * self.in_channels)  # [N, H*D]
+            x = torch.concat(x_, dim=-1)  # [N, H, D*(K+1)]
+            x = x.reshape(-1, self.num_heads * self.in_channels * (self.K_order + 1))  # [N, H*D*(K+1)]
+            x_out = self.Wo(x) / self.num_heads  # [N, D]
         elif self.solver == 'inverse':
             L, x_batch, node_mask = prepare_data_inverse(
                 qs=qs, ks=ks, x=x, n_nodes=n_nodes, edge_index=edge_index,
@@ -266,10 +266,9 @@ class GloAttnConv(nn.Module):
                 x_h = torch.linalg.solve(L_h, x_batch)  # [B, M, D]
                 x_ .append(x_h[node_mask])  # [N, D]
             x = torch.cat(x_, dim=1)  # [N, H * D]
+            x_out = self.Wo(x) / self.num_heads  # [N, D]
         else:
             raise NotImplementedError
-
-        x_out = self.Wo(x) / self.num_heads  # [N, D]
 
         return x_out
 
