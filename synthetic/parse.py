@@ -69,8 +69,8 @@ def parser_add_main_args(parser):
     # setup and protocol
     parser.add_argument('--dataset', type=str, default='cora')
     parser.add_argument('--data_dir', type=str,
-                        default='/mnt/nas/home/wuqitian/NodeFormer/data/')
-    parser.add_argument('--syn_type', type=str, choices=['edge', 'block', 'both'], default='edge')
+                        default='../../../OODgraph-GNNSafe/data/')
+    parser.add_argument('--syn_type', type=str, default='edge')
     parser.add_argument('--device', type=int, default=0,
                         help='which gpu to use if any (default: 0)')
     parser.add_argument('--cpu', action='store_true')

@@ -406,9 +406,7 @@ def load_arxiv_dataset(data_dir, method, train_num=3):
 
 @torch.no_grad()
 def create_synthetic_dataset(num_nodes, feat_dim, block_num, env_num, syn_type='edge'):
-    if syn_type == 'edge':
-        # p_iis = 0.1 - torch.arange(0, 0.02, 0.02 / env_num)
-        # p_ijs = 0.01 + torch.arange(0, 0.02, 0.02 / env_num)
+    if syn_type == 'homophily':
         p_iis = 0.1 * torch.ones(env_num)
         p_ijs = 0.01 + torch.arange(0, 0.05, 0.05 / env_num)
         block_nums = block_num * torch.ones(env_num, dtype=torch.long)
@@ -416,16 +414,16 @@ def create_synthetic_dataset(num_nodes, feat_dim, block_num, env_num, syn_type='
         p_iis = 0.1 * torch.ones(env_num)
         p_ijs = 0.01 * torch.ones(env_num)
         block_nums = block_num + torch.arange(0, env_num, 1)
-    elif syn_type == 'both':
-        p_iis = 0.1 - torch.arange(0, 0.1, 0.1 / env_num)
+    elif syn_type == 'density':
+        p_iis = 0.1 + torch.arange(0, 0.1, 0.1 / env_num)
         p_ijs = 0.01 + torch.arange(0, 0.1, 0.1 / env_num)
-        block_nums = block_num + torch.arange(0, env_num, 1)
+        block_nums = block_num * torch.ones(env_num, dtype=torch.long)
     else:
         raise NotImplementedError
 
     f_x = MLP(1, feat_dim, feat_dim, 2)
     f_y1 = DIFFormer(1, feat_dim, 1, 1, use_residual=True, use_act=True, use_bn=True, use_weight=True, use_graph=False)
-    f_y2 = GCN(1, feat_dim, 1, 1)
+    f_y2 = GCN(1, feat_dim, 1, 2)
 
     def gen_edge_index(block_n, p_ii, p_ij):
         blocks = torch.zeros(num_nodes, dtype=torch.long)
@@ -463,23 +461,24 @@ def create_synthetic_dataset(num_nodes, feat_dim, block_num, env_num, syn_type='
 
     return dataset_list
 
-def load_synthetic_dataset(data_dir, num_nodes=1000, feat_dim=10, block_num=5, env_num=10, syn_type='edge'):
-    # data_dir = data_dir + f'synthetic/sbm-edgeprop'
-    # if not os.path.exists(data_dir + '-0.pkl'):
-    #     datasets = create_synthetic_dataset(num_nodes, feat_dim, block_num, env_num)
-    #     for i, d in enumerate(datasets):
-    #         file_path = data_dir + f'-{i}.pkl'
-    #         with open(file_path, 'wb') as f:
-    #             pkl.dump(d, f, pkl.HIGHEST_PROTOCOL)
-    # else:
-    #     print("using existing synthetic data...")
-    #     datasets = []
-    #     for i in range(env_num):
-    #         file_path = data_dir + f'-{i}.pkl'
-    #         with open(file_path, 'rb') as f:
-    #             dataset = pkl.load(f)
-    #         datasets.append(dataset)
-    datasets = create_synthetic_dataset(num_nodes, feat_dim, block_num, env_num, syn_type)
+def load_synthetic_dataset(data_dir, run=0, num_nodes=1000, feat_dim=4, block_num=5, env_num=12, syn_type='edge'):
+    data_dir = data_dir + f'synthetic/{syn_type}-{run}'
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+        datasets = create_synthetic_dataset(num_nodes, feat_dim, block_num, env_num, syn_type)
+        for i, d in enumerate(datasets):
+            file_path = data_dir + f'/{i}.pkl'
+            with open(file_path, 'wb') as f:
+                pkl.dump(d, f, pkl.HIGHEST_PROTOCOL)
+    else:
+        print("using existing synthetic data...")
+        datasets = []
+        for i in range(env_num):
+            file_path = data_dir + f'/{i}.pkl'
+            with open(file_path, 'rb') as f:
+                dataset = pkl.load(f)
+            datasets.append(dataset)
+    # datasets = create_synthetic_dataset(num_nodes, feat_dim, block_num, env_num, syn_type)
     dataset_tr, dataset_val = datasets[0], datasets[1]
     dataset_tr.train_idx = torch.arange(dataset_tr.x.size(0))
     dataset_tr.train_env_num = 1

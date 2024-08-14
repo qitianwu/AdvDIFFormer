@@ -254,25 +254,3 @@ class DIFFormer(nn.Module):
         # output MLP layer
         x_out = self.fcs[-1](x)
         return x_out
-
-    def sup_loss_calc(self, y, pred, criterion, args):
-        if args.dataset in ('twitch', 'elliptic', 'ppi', 'proteins'):
-            if y.shape[1] == 1:
-                true_label = F.one_hot(y, y.max() + 1).squeeze(1)
-            else:
-                true_label = y
-            loss = criterion(pred, true_label.squeeze(1).to(torch.float))
-        elif args.dataset in ('synthetic'):
-            loss = criterion(pred, y)
-        else:
-            out = F.log_softmax(pred, dim=1)
-            target = y.squeeze(1)
-            loss = criterion(out, target)
-        return loss
-
-    def loss_compute(self, d, criterion, args):
-        logits = self.forward(d.x, d.edge_index, d.batch, block_wise=args.use_block)[d.train_idx]
-        y = d.y[d.train_idx]
-        sup_loss = self.sup_loss_calc(y, logits, criterion, args)
-        loss = sup_loss
-        return loss
