@@ -12,7 +12,7 @@ The model is applied to information networks, dynamic protein interactions and m
 
 ## Run the codes
 
-- Information Networks: `node-classification` and `synthetic`
+- Information Networks: `node-classification`
 - Dynamic Protein Interactions: `dppin`
 - Molecular Mapping Generation: `ham`
 
