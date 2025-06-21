@@ -2,6 +2,12 @@
 
 The official implementation for ICML2025 paper "Supercharging Graph Transformers with Advective Diffusion".
 
+<img width="654" alt="image" src="https://github.com/user-attachments/assets/0ccba7e5-0eff-4185-a6fa-854fab464537" />
+
+## Results
+
+<img width="996" alt="image" src="https://github.com/user-attachments/assets/255e8bf2-8511-40a9-a5b2-45116ff44cb7" />
+
 - Information Networks: `node-classification` and `synthetic`
 - Dynamic Protein Interactions: `dppin`
 - Molecular Mapping Generation: `ham`
