@@ -2,22 +2,15 @@
 
 The official implementation for ICML2025 paper "Supercharging Graph Transformers with Advective Diffusion".
 
- ## Information Networks
-
-
-
- ## Dynamic Protein Interactions
-
-
- ## Molecular Mapping Generation
-
-> python main.py --data_dir data --lr 5e-5 --dropout 0.1 --heads 2 --gnn ours-series --num_layer 5 --dim 256 --log_dir log --store_model --epoch 200 --device 0 --bs 256 --alpha 0.5 --K_order 4
+- Information Networks: `node-classification` and `synthetic`
+- Dynamic Protein Interactions: `dppin`
+- Molecular Mapping Generation: `ham`
 
 ## Run the codes
 
 Please refer to the bash script `run.sh` in each folder for running the training and evaluation pipeline.
 
-### Citation
+## Citation
 
 If you find our code and model useful, please cite our work. Thank you!
 

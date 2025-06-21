@@ -131,12 +131,12 @@ class GloAttnConv(torch.nn.Module):
         return outputs
 
 
-class OursSeries(torch.nn.Module):
+class AdvDIFFormer(torch.nn.Module):
     def __init__(
         self, emb_dim, num_layer, num_heads=1,  K_order=3,
         alpha=0.5, dropout=0.5, use_bn=True, use_residual=True,
     ):
-        super(OursSeries, self).__init__()
+        super(AdvDIFFormer, self).__init__()
         self.attn_convs = torch.nn.ModuleList()
         self.fcs = torch.nn.ModuleList()
         self.atom_encoder = torch.nn.Embedding(16, emb_dim)

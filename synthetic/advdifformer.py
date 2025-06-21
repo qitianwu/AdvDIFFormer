@@ -221,7 +221,7 @@ class GloAttnConv(nn.Module):
 
 class AdvDIFFormer(nn.Module):
     '''
-    PCFormer model class
+    AdvDIFFormer model class
     x: input node features [N, D]
     edge_index: 2-dim indices of edges [2, E]
     return y_hat predicted logits [N, C]

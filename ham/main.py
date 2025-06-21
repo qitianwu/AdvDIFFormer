@@ -11,7 +11,7 @@ import json
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from GAT import GAT
-from ours_series import OursSeries
+from advdifformer import AdvDIFFormer
 from difformer import DIFFormer
 from graphgps import GPSModel
 
@@ -95,8 +95,8 @@ if __name__ == '__main__':
         model = GAT(
             args.dim, args.num_layer, args.dropout, args.heads
         ).to(device)
-    elif args.gnn == 'ours-series':
-        model = OursSeries(
+    elif args.gnn == 'advdifformer':
+        model = AdvDIFFormer(
             emb_dim=args.dim, num_layer=args.num_layer,  num_heads=args.heads,
             K_order=args.K_order, alpha=args.alpha, dropout=args.dropout,
             use_bn=True, use_residual=True,
