@@ -6,13 +6,15 @@ The official implementation for ICML2025 paper "Supercharging Graph Transformers
 
 ## Results
 
+The model is applied to information networks, dynamic protein interactions and molecular mapping operator generation.
+
 <img width="996" alt="image" src="https://github.com/user-attachments/assets/255e8bf2-8511-40a9-a5b2-45116ff44cb7" />
+
+## Run the codes
 
 - Information Networks: `node-classification` and `synthetic`
 - Dynamic Protein Interactions: `dppin`
 - Molecular Mapping Generation: `ham`
-
-## Run the codes
 
 Please refer to the bash script `run.sh` in each folder for running the training and evaluation pipeline.
 
