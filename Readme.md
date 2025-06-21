@@ -1,6 +1,6 @@
  # Advective Diffusion Transformer (AdvDIFFormer)
 
-The official implementation for ICML2025 paper "Supercharging Graph Transformers with Advective Diffusion". [Paper](https://arxiv.org/pdf/2310.06417)
+The official implementation for ICML2025 paper "Supercharging Graph Transformers with Advective Diffusion" ([Paper](https://arxiv.org/pdf/2310.06417)).
 
 AdvDIFFormer is a graph Transformer model with continuous message passing layers that are provably resilient to distribution shifts of graph topologies. The model has two implementation versions AdvDIFFormer-i (derived from numerical PDE solver) and AdvDIFFormer-s (with linear complexity w.r.t. node numbers).
 
