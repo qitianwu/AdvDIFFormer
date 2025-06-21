@@ -2,7 +2,7 @@
 
 The official implementation for ICML2025 paper "Supercharging Graph Transformers with Advective Diffusion" ([Paper](https://arxiv.org/pdf/2310.06417)).
 
-AdvDIFFormer is a graph Transformer model with continuous message passing layers that are provably resilient to distribution shifts of graph topologies. The model has two implementation versions AdvDIFFormer-i (derived from numerical PDE solver) and AdvDIFFormer-s (with linear complexity w.r.t. node numbers).
+AdvDIFFormer is a graph Transformer model derived from the closed-form solution of advective diffusion equation models that are provably resilient to distribution shifts of graph topologies. The model has two implementation versions **AdvDIFFormer-i** and **AdvDIFFormer-s** (with linear complexity w.r.t. node numbers).
 
 For readers interested in more research works about graph Transformers, please refer to the series of previous models:
 
